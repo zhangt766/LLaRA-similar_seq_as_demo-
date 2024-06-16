@@ -167,6 +167,8 @@ output_file_path = '/data/projects/wsx/LLaRA/data/ref/movielens/similar_val_data
 process_data(file_path, item_file, output_file_path)
 
 
+
+##llama-2-7b
 import torch
 import os.path as op
 import numpy as np
@@ -283,3 +285,90 @@ dataloader=DataLoader(dataset,batch_size=1,shuffle=True)
 for batch in dataloader:
     print(batch)
     break
+
+
+import pickle
+import pandas as pd
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import torch
+from transformers import LlamaTokenizer, LlamaModel
+
+# 全局加载LLaMA-2-7B模型
+model_name_or_path = "/workspace/llama/models_hf/7B"
+
+print("Loading tokenizer...")
+tokenizer = LlamaTokenizer.from_pretrained(model_name_or_path, local_files_only=True)
+# 设置pad_token为eos_token
+tokenizer.pad_token = tokenizer.eos_token
+print("Tokenizer loaded.")
+
+print("Loading model...")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = LlamaModel.from_pretrained(model_name_or_path, local_files_only=True)
+model.to(device)
+print("Model loaded.")
+
+def load_data(file_path):
+    return pd.read_pickle(file_path)
+
+def load_movie_dict(item_file):
+    item_df = pd.read_csv(item_file, sep='|', header=None, encoding='latin-1', usecols=[0, 1])
+    item_df.columns = ['movie_id', 'movie_title']
+    movie_dict = dict(zip(item_df['movie_id'], item_df['movie_title']))
+    return movie_dict
+
+def map_movie_names_only(seq, movie_dict):
+    return [movie_dict[id] if id in movie_dict else id for (id, rating) in seq]
+
+def extract_sequences(df, movie_dict):
+    df['movie_names_only'] = df['seq'].apply(lambda x: map_movie_names_only(x, movie_dict))
+    df['seq_only'] = df['seq'].apply(lambda x: [id for (id, rating) in x])
+    return df
+
+def get_movie_embeddings(movie_list):
+    embeddings = []
+    max_length = 512  # 设定一个合理的最大长度
+    for movies in movie_list:
+        movie_string = " ".join(str(movie) for movie in movies)
+        inputs = tokenizer(movie_string, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        with torch.no_grad():
+            outputs = model(**inputs)
+            movie_embedding = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
+        embeddings.append(movie_embedding)
+    return np.array(embeddings)
+
+def calculate_similarity(df):
+    movie_embeddings = get_movie_embeddings(df['movie_names_only'].tolist())
+    df['movie_embeddings'] = list(movie_embeddings)
+    embeddings = np.stack(df['movie_embeddings'].values)
+    similarity_matrix = cosine_similarity(embeddings)
+    most_similar_indices = np.argmax(similarity_matrix - np.eye(len(similarity_matrix)), axis=1)
+    df['most_similar_seq_index'] = most_similar_indices
+    df['most_similar_seq'] = df['most_similar_seq_index'].apply(lambda idx: df.at[idx, 'seq'])
+    return df
+
+def add_most_similar_seq_next(df, movie_dict):
+    df['most_similar_seq_next'] = df['next'].iloc[df['most_similar_seq_index']].values
+    df['most_similar_seq_name'] = df['most_similar_seq'].apply(lambda x: [movie_dict.get(item[0], "Unknown") for item in x])
+    df['most_similar_seq_next_name'] = df['most_similar_seq_next'].apply(lambda x: movie_dict.get(x[0], "Unknown"))
+    return df
+
+def save_data(df, output_file_path):
+    df.to_pickle(output_file_path)
+
+def process_data(file_path, item_file, output_file_path):
+    df = load_data(file_path)
+    movie_dict = load_movie_dict(item_file)
+    df = extract_sequences(df, movie_dict)
+    df = calculate_similarity(df)
+    df = add_most_similar_seq_next(df, movie_dict)
+    save_data(df, output_file_path)
+
+# 使用函数处理数据
+file_path = '/workspace/LLaRA/data/ref/movielens/train_data.df'
+item_file = '/workspace/LLaRA/data/ref/movielens/u.item'
+output_file_path = '/workspace/LLaRA/data/ref/movielens/similar_val_data.df'
+
+process_data(file_path, item_file, output_file_path)
