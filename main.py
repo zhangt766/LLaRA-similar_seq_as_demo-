@@ -68,6 +68,9 @@ def main(args):
         trainer.fit(model=model, datamodule=data_module)
     else:
         trainer.test(model=model, datamodule=data_module)
+    
+    model.llama_model.save_pretrained(args.output_dir)
+    model.llama_tokenizer.save_pretrained(args.output_dir)
 
 
 if __name__ == '__main__':
