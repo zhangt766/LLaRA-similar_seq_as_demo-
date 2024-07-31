@@ -7,7 +7,7 @@ import torch.optim.lr_scheduler as lrs
 
 import pytorch_lightning as pl
 
-from transformers import LlamaForCausalLM, LlamaTokenizer
+# from transformers import LlamaForCausalLM, LlamaTokenizer
 import random
 from pandas.core.frame import DataFrame
 import os.path as op
@@ -15,21 +15,144 @@ import os
 from optims import LinearWarmupCosineLRScheduler
 import numpy as np
 from peft import get_peft_config, get_peft_model, get_peft_model_state_dict, LoraConfig, TaskType, PeftModel
+import json
+from unsloth import FastLanguageModel 
+import re
+
+prompt = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.
+
+Candidate Watch History:
+{movie_lists}
+
+Target Watch History:
+{target_movie}
+
+Please output the similarity ratings in JSON format. The output should only contain the JSON object with similarity scores, without any additional text. Output:"""
+
+reco_prompt_history = """Demo: One user has watched {SimilarHistory}. Based on this, He/She will likely choose {SimilarChoice} to watch next. \n"""
+
+reco_prompt_instruct = """Task: The visit history of this user is: {HistoryHere}. Recommend one movie from the following set of titles: {CansHere}. The recommendation should contain one movie title only. Recommendation:"""
+
+TERMINATOR="\n"
 
 class MInterface(pl.LightningModule):
     def __init__(self, 
                  **kargs):
         super().__init__()
         self.save_hyperparameters()
-        self.load_llm(self.hparams.llm_path)
-        self.load_rec_model(self.hparams.rec_model_path)
-        self.load_projector()
+        self.is_test = (kargs["mode"]=="test")
+        self.load_unsloth_llm(self.hparams.llm_path)
+        self.batch_size = kargs["batch_size"]
+        # self.load_rec_model(self.hparams.rec_model_path)
+        # self.load_projector()
+    
+    # 对相似 demo 进行打分 TODO
+    def score_demo(self, input):
+        movie_list = [" ".join(names) for names in input["most_similar_seq_name"]]
+        movie_lists = ""
+        for i, name in enumerate(movie_list):
+            movie_lists += f"Watch History {i+1}: {name} \n"
+        target_movie = " ".join(input["seq_name"][:input["len_seq"]])
+        input_prompt = prompt.format_map({"movie_lists":movie_lists,"target_movie":target_movie})
+        input = self.llama_tokenizer(input_prompt, return_tensors="pt")
+        FastLanguageModel.for_inference(self.llama_model)
+        output = self.llama_model.generate(input_ids=input["input_ids"].cuda(), attention_mask=input["attention_mask"].cuda(), temperature=0.1, max_new_tokens=256).cpu()[0]
+        FastLanguageModel.for_training(self.llama_model)
+        try:
+            output = json.loads("{"+self.llama_tokenizer.decode(output).split("{")[1].split("}")[0]+"}")
+            sorted_items = sorted(output.items(), key=lambda item: item[1], reverse=True)
+            # 获取分数最高的前5个键
+            top_5_idx = [int(re.findall(r'\d+', item[0])[0])-1 for item in sorted_items[:5]]
+            return top_5_idx
+        except:
+            print("bad format, cant decode")
+        return random.sample(range(10),5)
+    
+    # tokenize
+    def format_fn(self, input):
+        # top_5_idx = self.score_demo(input)
+        # similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
+        # similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
+        similar_historys = input["most_similar_seq_name"]
+        similar_choices = input["most_similar_seq_next_name"]
+        demos = [reco_prompt_history.format_map({"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for (similar_history,similar_choice) in zip(similar_historys, similar_choices)]
+        demos = "".join(demos)
+        instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
+        instruction = demos+" "+instruction
+        # print("instruction", instruction)
+        return instruction
+
+    def collate_fn(self, batch):
+        cans_name = [input["cans_name"] for input in batch]
+        inputs_text = [self.format_fn(input) for input in batch]
+        targets_text = [input["correct_answer"] + TERMINATOR for input in batch]
+
+        if self.llama_model.training:
+            targets_text = [target_text + TERMINATOR for target_text in targets_text]
+            inputs_pair = [[p, t] for p, t in zip(inputs_text, targets_text)]
+            batch_tokens = self.llama_tokenizer(
+                inputs_pair,
+                return_tensors="pt",
+                padding="longest",
+                truncation=False,
+                add_special_tokens=True,
+                return_attention_mask=True,
+                return_token_type_ids=True)
+            # most_similar_seq_next=[sample['most_similar_seq_next'] for sample in batch]
+            new_batch = {
+                "tokens": batch_tokens,
+                "seq": torch.stack([torch.tensor(sample['seq']) for sample in batch], dim=0),
+                "cans": torch.stack([torch.tensor(sample['cans']) for sample in batch], dim=0),
+                "len_seq": torch.stack([torch.tensor(sample['len_seq']) for sample in batch], dim=0),
+                "len_cans": torch.stack([torch.tensor(sample['len_cans']) for sample in batch], dim=0),
+                "item_id": torch.stack([torch.tensor(sample['item_id']) for sample in batch], dim=0),
+                "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
+                "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
+                
+            }
+        else:
+            batch_tokens = self.llama_tokenizer(
+                inputs_text,
+                return_tensors="pt",
+                padding="longest",
+                truncation=False,
+                add_special_tokens=True,
+                return_attention_mask=True)
+            cans_name = [sample['cans_name'] for sample in batch]
+            # most_similar_seq_next=[sample['most_similar_seq_next'] for sample in batch]
+            new_batch = {
+                "tokens": batch_tokens,
+                "seq": torch.stack([torch.tensor(sample['seq']) for sample in batch], dim=0),
+                "cans": torch.stack([torch.tensor(sample['cans']) for sample in batch], dim=0),
+                "len_seq": torch.stack([torch.tensor(sample['len_seq']) for sample in batch], dim=0),
+                "len_cans": torch.stack([torch.tensor(sample['len_cans']) for sample in batch], dim=0),
+                "item_id": torch.stack([torch.tensor(sample['item_id']) for sample in batch], dim=0),
+                "correct_answer": targets_text,
+                "cans_name": cans_name,
+                "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
+                "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
+                
+            }
+        return new_batch
+    
+    def batch_preprocess(self, batch):
+        batch = self.collate_fn(batch)
+        batch["tokens"].input_ids = batch["tokens"].input_ids.cuda()
+        batch["tokens"].attention_mask = batch["tokens"].attention_mask.cuda()
+        if self.llama_model.training:
+            batch["tokens"].token_type_ids = batch["tokens"].token_type_ids.cuda()
+        return batch
 
     def forward(self, batch):
         targets = batch["tokens"].input_ids.masked_fill(
             batch["tokens"].input_ids == self.llama_tokenizer.pad_token_id, -100
         ) # [batch_size, max_len]
-        targets = targets.masked_fill((batch["tokens"].token_type_ids == 0)[:,1:], -100)
+        # print("targets", targets.shape)
+        # tmp = (batch["tokens"].token_type_ids == 0)[:,1:]
+        # print("mask", tmp.shape)
+        # print("token_type_ids",batch["tokens"].token_type_ids)
+        targets = targets.masked_fill((batch["tokens"].token_type_ids == 0), -100)
+        # targets = targets.masked_fill((batch["tokens"].token_type_ids == 0)[:,1:], -100)
         input_embeds = self.wrap_emb(batch)
         outputs = self.llama_model(
             inputs_embeds=input_embeds,
@@ -40,14 +163,13 @@ class MInterface(pl.LightningModule):
         )
         return outputs
 
-    def generate(self, batch,temperature=0.8,do_sample=False,num_beams=1,max_gen_length=64,min_gen_length=1,repetition_penalty=1.0,length_penalty=1.0, num_return_sequences=1):
-        input_embeds = self.wrap_emb(batch)
-            
-    
+    def generate(self, batch, temperature=0.8,do_sample=False,num_beams=1,max_gen_length=64,min_gen_length=1,repetition_penalty=1.0,length_penalty=1.0, num_return_sequences=1):
+        # input_embeds = self.wrap_emb(batch)
         # Convert input_embeds to float32
-        input_embeds = input_embeds.to(torch.float32)
+        # input_embeds = input_embeds.to(torch.float32)
         generate_ids = self.llama_model.generate(
-            inputs_embeds=input_embeds,
+            input_ids = batch["tokens"].input_ids,
+            # inputs_embeds=input_embeds, 
             attention_mask=batch["tokens"].attention_mask,
             temperature=temperature,
             do_sample=do_sample,
@@ -58,29 +180,30 @@ class MInterface(pl.LightningModule):
             repetition_penalty=repetition_penalty,
             length_penalty=length_penalty,
             num_return_sequences=num_return_sequences,
-            
             )
         output_text=self.llama_tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         outputs=[text.strip() for text in output_text]
         return outputs
 
     def training_step(self, batch, batch_idx):
+        batch=self.batch_preprocess(batch)
         if self.scheduler:
             self.scheduler.step(self.trainer.global_step, self.current_epoch, self.trainer.max_steps)
-        if batch["flag"]:
-            for name, param in self.projector.named_parameters():
-                param.requires_grad = False
-        else:
-            for name, param in self.projector.named_parameters():
-                param.requires_grad = True
+        # if batch["flag"]:
+        #     for name, param in self.projector.named_parameters():
+        #         param.requires_grad = False
+        # else:
+        #     for name, param in self.projector.named_parameters():
+        #         param.requires_grad = True
         out = self(batch)
         loss = self.configure_loss(out)
-        self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('lr', self.scheduler.optimizer.param_groups[0]['lr'], on_step=True, on_epoch=True, prog_bar=True)
-        self.log('global_step_num', self.trainer.global_step, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('lr', self.scheduler.optimizer.param_groups[0]['lr'], on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('global_step_num', self.trainer.global_step, on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         return loss
     
     def on_validation_epoch_start(self):
+        FastLanguageModel.for_inference(self.llama_model)
         self.val_content={
             "generate":[],
             "real":[],
@@ -89,6 +212,7 @@ class MInterface(pl.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        batch=self.batch_preprocess(batch)
         generate_output = self.generate(batch)
         output=[]
         for i,generate in enumerate(generate_output):
@@ -105,15 +229,16 @@ class MInterface(pl.LightningModule):
             self.val_content["cans"].append(cans)
 
     def on_validation_epoch_end(self):
+        FastLanguageModel.for_training(self.llama_model)
         df=DataFrame(self.val_content)
         if not os.path.exists(self.hparams.output_dir):
             os.makedirs(self.hparams.output_dir)
         df.to_csv(op.join(self.hparams.output_dir, 'valid.csv'))
         prediction_valid_ratio,hr=self.calculate_hr1(self.val_content)
         metric=hr*prediction_valid_ratio
-        self.log('val_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_hr', hr, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('val_hr', hr, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
 
     def on_test_epoch_start(self):
         self.test_content={
@@ -124,6 +249,7 @@ class MInterface(pl.LightningModule):
 
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
+        batch=self.batch_preprocess(batch)
         generate_output = self.generate(batch)
         output=[]
         for i,generate in enumerate(generate_output):
@@ -146,9 +272,9 @@ class MInterface(pl.LightningModule):
         df.to_csv(op.join(self.hparams.output_dir, 'test.csv'))
         prediction_valid_ratio,hr=self.calculate_hr1(self.test_content)
         metric=hr*prediction_valid_ratio
-        self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
 
     def configure_optimizers(self):
         if hasattr(self.hparams, 'weight_decay'):
@@ -156,7 +282,7 @@ class MInterface(pl.LightningModule):
         else:
             weight_decay = 0
         optimizer = torch.optim.Adam([
-            {'params': self.projector.parameters(), 'lr': self.hparams.lr, 'weight_decay':weight_decay},
+            # {'params': self.projector.parameters(), 'lr': self.hparams.lr, 'weight_decay':weight_decay},
             {'params': self.llama_model.parameters(), 'lr': self.hparams.lr}
         ])
 
@@ -200,96 +326,130 @@ class MInterface(pl.LightningModule):
                 checkpoint['state_dict'].pop(key)
         elif self.hparams.save == 'all':
             pass
-        
-    def load_llm(self, llm_path):
-        print('Loading LLAMA')
-        self.llama_tokenizer = LlamaTokenizer.from_pretrained(llm_path, use_fast=False)
-        self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
-        self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        self.llama_tokenizer.padding_side = "right"
-        # self.llama_tokenizer.add_special_tokens({'additional_special_tokens': ['[PH]','[HistoryEmb]','[CansEmb]','[ItemEmb]']})
-        self.llama_tokenizer.add_special_tokens({
-        'additional_special_tokens': [
-            '[PH]',
-            '[HistoryEmb]',
-            '[CansEmb]',
-            '[ItemEmb]',
-            '[SimilarHistoryEmb]',
-            '[SimilarChoiceEmb]'
-        ]
-    })
-        self.llama_model = LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
-        self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
-        if self.hparams.llm_tuning == 'lora':
-            if self.hparams.peft_dir:
-                self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
-            else:
-                if self.hparams.peft_config:
-                    peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
-                else:
-                    peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
-                                             inference_mode=False,
-                                             r=self.hparams.lora_r,
-                                             lora_alpha=self.hparams.lora_alpha,
-                                             lora_dropout=self.hparams.lora_dropout,
-                                             target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
-                self.peft_config = peft_config
-                self.llama_model = get_peft_model(self.llama_model, peft_config)
-            self.llama_model.print_trainable_parameters()
-        elif self.hparams.llm_tuning == 'freeze':
-            for name, param in self.llama_model.named_parameters():
-                param.requires_grad = False
-        elif self.hparams.llm_tuning == 'freeze_lora':
-            if self.hparams.peft_dir:
-                self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
-            else:
-                if self.hparams.peft_config:
-                    peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
-                else:
-                    peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
-                                             inference_mode=False,
-                                             r=self.hparams.lora_r,
-                                             lora_alpha=self.hparams.lora_alpha,
-                                             lora_dropout=self.hparams.lora_dropout,
-                                             target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
-                self.peft_config = peft_config
-                self.llama_model = get_peft_model(self.llama_model, peft_config)
-            for name, param in self.llama_model.named_parameters():
-                param.requires_grad = False
-            self.llama_model.print_trainable_parameters()
+    
+    def load_unsloth_llm(self, llm_path):
+        max_seq_length = 2048
+        if torch.cuda.is_bf16_supported():
+            dtype = torch.bfloat16
         else:
-            raise NotImplementedError()
+            dtype = torch.float16
+        dtype=None
+
+        self.llama_model, self.llama_tokenizer = FastLanguageModel.from_pretrained(
+            model_name = llm_path,
+            max_seq_length = max_seq_length,
+            dtype = dtype,
+            load_in_4bit = True,
+        )
+
+        if not self.is_test:
+            self.llama_model = FastLanguageModel.get_peft_model(
+                self.llama_model,
+                r = 16,
+                target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                                "gate_proj", "up_proj", "down_proj",],
+                lora_alpha = 16,
+                lora_dropout = 0, # Supports any, but = 0 is optimized
+                bias = "none",    # Supports any, but = "none" is optimized
+                # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
+                use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+                random_state = 3407,
+                max_seq_length = max_seq_length,
+                use_rslora = False,  # We support rank stabilized LoRA
+                loftq_config = None, # And LoftQ
+            )
+        else:
+            FastLanguageModel.for_inference(self.llama_model)
+        
+    # def load_llm(self, llm_path):
+    #     print('Loading LLAMA')
+    #     self.llama_tokenizer = LlamaTokenizer.from_pretrained(llm_path, use_fast=False)
+    #     self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+    #     self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    #     self.llama_tokenizer.padding_side = "right"
+    #     # self.llama_tokenizer.add_special_tokens({'additional_special_tokens': ['[PH]','[HistoryEmb]','[CansEmb]','[ItemEmb]']})
+    #     self.llama_tokenizer.add_special_tokens({
+    #     'additional_special_tokens': [
+    #         '[PH]',
+    #         '[HistoryEmb]',
+    #         '[CansEmb]',
+    #         '[ItemEmb]',
+    #         '[SimilarHistoryEmb]',
+    #         '[SimilarChoiceEmb]'
+    #     ]
+    # })
+    #     self.llama_model = LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
+    #     self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+    #     if self.hparams.llm_tuning == 'lora':
+    #         if self.hparams.peft_dir:
+    #             self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
+    #         else:
+    #             if self.hparams.peft_config:
+    #                 peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
+    #             else:
+    #                 peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
+    #                                          inference_mode=False,
+    #                                          r=self.hparams.lora_r,
+    #                                          lora_alpha=self.hparams.lora_alpha,
+    #                                          lora_dropout=self.hparams.lora_dropout,
+    #                                          target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
+    #             self.peft_config = peft_config
+    #             self.llama_model = get_peft_model(self.llama_model, peft_config)
+    #         self.llama_model.print_trainable_parameters()
+    #     elif self.hparams.llm_tuning == 'freeze':
+    #         for name, param in self.llama_model.named_parameters():
+    #             param.requires_grad = False
+    #     elif self.hparams.llm_tuning == 'freeze_lora':
+    #         if self.hparams.peft_dir:
+    #             self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
+    #         else:
+    #             if self.hparams.peft_config:
+    #                 peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
+    #             else:
+    #                 peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
+    #                                          inference_mode=False,
+    #                                          r=self.hparams.lora_r,
+    #                                          lora_alpha=self.hparams.lora_alpha,
+    #                                          lora_dropout=self.hparams.lora_dropout,
+    #                                          target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
+    #             self.peft_config = peft_config
+    #             self.llama_model = get_peft_model(self.llama_model, peft_config)
+    #         for name, param in self.llama_model.named_parameters():
+    #             param.requires_grad = False
+    #         self.llama_model.print_trainable_parameters()
+    #     else:
+    #         raise NotImplementedError()
  
-        print('Loading LLAMA Done')
+    #     print('Loading LLAMA Done')
 
-    def load_projector(self):
-        name = self.hparams.model_name
-        camel_name = ''.join([i.capitalize() for i in name.split('_')])
-        try:
-            Model = getattr(importlib.import_module(
-                '.'+name, package=__package__), camel_name)
-        except:
-            raise ValueError(
-                f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
-        self.projector = self.instancialize(Model, rec_size=self.hparams.rec_size, llm_size=self.llama_model.config.hidden_size)
+    # def load_projector(self):
+    #     name = self.hparams.model_name
+    #     camel_name = ''.join([i.capitalize() for i in name.split('_')])
+    #     try:
+    #         Model = getattr(importlib.import_module(
+    #             '.'+name, package=__package__), camel_name)
+    #     except:
+    #         raise ValueError(
+    #             f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
+    #     self.projector = self.instancialize(Model, rec_size=self.hparams.rec_size, llm_size=self.llama_model.config.hidden_size)
 
-    def instancialize(self, Model, **other_args):
-        class_args = inspect.getargspec(Model.__init__).args[1:]
-        inkeys = self.hparams.keys()
-        args1 = {}
-        for arg in class_args:
-            if arg in inkeys:
-                args1[arg] = getattr(self.hparams, arg)
-        args1.update(other_args)
-        return Model(**args1)
+    # def instancialize(self, Model, **other_args):
+    #     class_args = inspect.getargspec(Model.__init__).args[1:]
+    #     inkeys = self.hparams.keys()
+    #     args1 = {}
+    #     for arg in class_args:
+    #         if arg in inkeys:
+    #             args1[arg] = getattr(self.hparams, arg)
+    #     args1.update(other_args)
+    #     return Model(**args1)
 
-    def load_rec_model(self, rec_model_path):
-        print('Loading Rec Model')
-        self.rec_model = torch.load(rec_model_path, map_location="cpu")
-        self.rec_model.eval()
-        for name, param in self.rec_model.named_parameters():
-            param.requires_grad = False
-        print('Loding Rec model Done')
+    # def load_rec_model(self, rec_model_path):
+    #     print('Loading Rec Model')
+    #     self.rec_model = torch.load(rec_model_path, map_location="cpu")
+    #     self.rec_model.eval()
+    #     for name, param in self.rec_model.named_parameters():
+    #         param.requires_grad = False
+    #     print('Loding Rec model Done')
 
     def encode_items(self, seq):
         if self.hparams.rec_embed=="SASRec":
@@ -305,7 +465,7 @@ class MInterface(pl.LightningModule):
 
     def wrap_emb(self, batch):
         input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids)
-        
+        return input_embeds
         # his_token_id=self.llama_tokenizer("[HistoryEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # cans_token_id=self.llama_tokenizer("[CansEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # item_token_id=self.llama_tokenizer("[ItemEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
