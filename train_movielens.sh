@@ -10,11 +10,11 @@ CUDA_VISIBLE_DEVICES=1 python3 main.py \
 --accumulate_grad_batches 8 \
 --dataset movielens_data \
 --data_dir /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/data/LLaRA/movielens \
---cans_num 10 \
+--cans_num 20 \
 --prompt_path /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
 --rec_embed SASRec \
 --llm_tuning lora \
---llm_path /mnt/bn/data-tns-live-llm/leon/datasets/llama-2-7b-bnb-4bit \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/Llama-2-7b-hf \
 --rec_model_path ./rec_model/movielens.pt \
 --output_dir /mnt/bn/data-tns-live-llm/leon/datasets/rec/movielens \
 --log_dir movielens_logs \

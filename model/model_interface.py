@@ -7,7 +7,7 @@ import torch.optim.lr_scheduler as lrs
 
 import pytorch_lightning as pl
 
-# from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer
 import random
 from pandas.core.frame import DataFrame
 import os.path as op
@@ -18,6 +18,19 @@ from peft import get_peft_config, get_peft_model, get_peft_model_state_dict, Lor
 import json
 from unsloth import FastLanguageModel 
 import re
+import copy
+from transformers import Trainer, BitsAndBytesConfig, AutoTokenizer
+from unsloth import FastLanguageModel 
+from unsloth import is_bfloat16_supported
+import os
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    get_peft_model_state_dict,
+    prepare_model_for_kbit_training,
+    set_peft_model_state_dict,
+)
+from transformers import AutoModelForCausalLM, LlamaForCausalLM
 
 prompt = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.
 
@@ -41,10 +54,22 @@ class MInterface(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.is_test = (kargs["mode"]=="test")
-        self.load_unsloth_llm(self.hparams.llm_path)
+        self.get_quant_model(self.hparams.llm_path)
+        self.copy_and_quantization()
         self.batch_size = kargs["batch_size"]
         # self.load_rec_model(self.hparams.rec_model_path)
         # self.load_projector()
+    
+    def copy_and_quantization(self):
+        source_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter"
+        self.llama_model.save_pretrained(source_path)
+        self.score_model = LlamaForCausalLM.from_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/Llama-2-7b-hf")
+        self.score_model.resize_token_embeddings(len(self.llama_tokenizer))
+        self.score_model = PeftModel.from_pretrained(self.score_model, source_path)
+        self.score_model = self.score_model.merge_and_unload()
+        self.score_model.generation_config.pad_token_id = self.llama_tokenizer.eos_token_id
+        self.score_model.save_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model")
+        self.score_model = LlamaForCausalLM.from_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model", load_in_4bit=True)
     
     # 对相似 demo 进行打分 TODO
     def score_demo(self, input):
@@ -55,9 +80,7 @@ class MInterface(pl.LightningModule):
         target_movie = " ".join(input["seq_name"][:input["len_seq"]])
         input_prompt = prompt.format_map({"movie_lists":movie_lists,"target_movie":target_movie})
         input = self.llama_tokenizer(input_prompt, return_tensors="pt")
-        FastLanguageModel.for_inference(self.llama_model)
-        output = self.llama_model.generate(input_ids=input["input_ids"].cuda(), attention_mask=input["attention_mask"].cuda(), temperature=0.1, max_new_tokens=256).cpu()[0]
-        FastLanguageModel.for_training(self.llama_model)
+        output = self.score_model.generate(input_ids=input["input_ids"].cuda(),attention_mask=input["attention_mask"].cuda(),temperature=0.1, max_new_tokens=128).cpu()[0]
         try:
             output = json.loads("{"+self.llama_tokenizer.decode(output).split("{")[1].split("}")[0]+"}")
             sorted_items = sorted(output.items(), key=lambda item: item[1], reverse=True)
@@ -65,16 +88,16 @@ class MInterface(pl.LightningModule):
             top_5_idx = [int(re.findall(r'\d+', item[0])[0])-1 for item in sorted_items[:5]]
             return top_5_idx
         except:
-            print("bad format, cant decode")
+            print("bad format, cant decode", self.llama_tokenizer.decode(output).split("Output:")[1])
         return random.sample(range(10),5)
     
     # tokenize
     def format_fn(self, input):
-        # top_5_idx = self.score_demo(input)
-        # similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
-        # similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
-        similar_historys = input["most_similar_seq_name"]
-        similar_choices = input["most_similar_seq_next_name"]
+        top_5_idx = self.score_demo(input)
+        similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
+        similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
+        # similar_historys = input["most_similar_seq_name"]
+        # similar_choices = input["most_similar_seq_next_name"]
         demos = [reco_prompt_history.format_map({"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for (similar_history,similar_choice) in zip(similar_historys, similar_choices)]
         demos = "".join(demos)
         instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
@@ -200,6 +223,10 @@ class MInterface(pl.LightningModule):
         self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         self.log('lr', self.scheduler.optimizer.param_groups[0]['lr'], on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         self.log('global_step_num', self.trainer.global_step, on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+
+        #每1000step 更新 score model
+        # print(batch_idx)
+        if (batch_idx+1)%1000==0: self.copy_and_quantization()
         return loss
     
     def on_validation_epoch_start(self):
@@ -348,7 +375,7 @@ class MInterface(pl.LightningModule):
                 r = 16,
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                                 "gate_proj", "up_proj", "down_proj",],
-                lora_alpha = 16,
+                lora_alpha = 32,
                 lora_dropout = 0, # Supports any, but = 0 is optimized
                 bias = "none",    # Supports any, but = "none" is optimized
                 # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
@@ -360,67 +387,98 @@ class MInterface(pl.LightningModule):
             )
         else:
             FastLanguageModel.for_inference(self.llama_model)
+    
+    def get_quant_model(self, llm_path):
+        if torch.cuda.is_bf16_supported():
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
+
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+        self.llama_tokenizer = AutoTokenizer.from_pretrained(llm_path, model_max_length=1024)
+        self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+        self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        self.llama_tokenizer.padding_side = "right"
+
+        self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, quantization_config=quantization_config)
+        self.llama_model = prepare_model_for_kbit_training(self.llama_model)
+        self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+        peft_config = LoraConfig(
+            r=16,
+            lora_alpha=16,
+            lora_dropout=0,
+            target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        self.llama_model = get_peft_model(self.llama_model, peft_config)
+        self.llama_model.print_trainable_parameters()
         
-    # def load_llm(self, llm_path):
-    #     print('Loading LLAMA')
-    #     self.llama_tokenizer = LlamaTokenizer.from_pretrained(llm_path, use_fast=False)
-    #     self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
-    #     self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-    #     self.llama_tokenizer.padding_side = "right"
-    #     # self.llama_tokenizer.add_special_tokens({'additional_special_tokens': ['[PH]','[HistoryEmb]','[CansEmb]','[ItemEmb]']})
-    #     self.llama_tokenizer.add_special_tokens({
-    #     'additional_special_tokens': [
-    #         '[PH]',
-    #         '[HistoryEmb]',
-    #         '[CansEmb]',
-    #         '[ItemEmb]',
-    #         '[SimilarHistoryEmb]',
-    #         '[SimilarChoiceEmb]'
-    #     ]
-    # })
-    #     self.llama_model = LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
-    #     self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
-    #     if self.hparams.llm_tuning == 'lora':
-    #         if self.hparams.peft_dir:
-    #             self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
-    #         else:
-    #             if self.hparams.peft_config:
-    #                 peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
-    #             else:
-    #                 peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
-    #                                          inference_mode=False,
-    #                                          r=self.hparams.lora_r,
-    #                                          lora_alpha=self.hparams.lora_alpha,
-    #                                          lora_dropout=self.hparams.lora_dropout,
-    #                                          target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
-    #             self.peft_config = peft_config
-    #             self.llama_model = get_peft_model(self.llama_model, peft_config)
-    #         self.llama_model.print_trainable_parameters()
-    #     elif self.hparams.llm_tuning == 'freeze':
-    #         for name, param in self.llama_model.named_parameters():
-    #             param.requires_grad = False
-    #     elif self.hparams.llm_tuning == 'freeze_lora':
-    #         if self.hparams.peft_dir:
-    #             self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
-    #         else:
-    #             if self.hparams.peft_config:
-    #                 peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
-    #             else:
-    #                 peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
-    #                                          inference_mode=False,
-    #                                          r=self.hparams.lora_r,
-    #                                          lora_alpha=self.hparams.lora_alpha,
-    #                                          lora_dropout=self.hparams.lora_dropout,
-    #                                          target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
-    #             self.peft_config = peft_config
-    #             self.llama_model = get_peft_model(self.llama_model, peft_config)
-    #         for name, param in self.llama_model.named_parameters():
-    #             param.requires_grad = False
-    #         self.llama_model.print_trainable_parameters()
-    #     else:
-    #         raise NotImplementedError()
+    def load_llm(self, llm_path):
+        print('Loading LLAMA')
+        self.llama_tokenizer = LlamaTokenizer.from_pretrained(llm_path, use_fast=False)
+        self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+        self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        self.llama_tokenizer.padding_side = "right"
+        # self.llama_tokenizer.add_special_tokens({'additional_special_tokens': ['[PH]','[HistoryEmb]','[CansEmb]','[ItemEmb]']})
+        self.llama_tokenizer.add_special_tokens({
+        'additional_special_tokens': [
+            '[PH]',
+            '[HistoryEmb]',
+            '[CansEmb]',
+            '[ItemEmb]',
+            '[SimilarHistoryEmb]',
+            '[SimilarChoiceEmb]'
+        ]
+    })
+        self.llama_model = LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
+        self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+        if self.hparams.llm_tuning == 'lora':
+            if self.hparams.peft_dir:
+                self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
+            else:
+                if self.hparams.peft_config:
+                    peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
+                else:
+                    peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
+                                             inference_mode=False,
+                                             r=self.hparams.lora_r,
+                                             lora_alpha=self.hparams.lora_alpha,
+                                             lora_dropout=self.hparams.lora_dropout,
+                                             target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
+                self.peft_config = peft_config
+                self.llama_model = get_peft_model(self.llama_model, peft_config)
+            self.llama_model.print_trainable_parameters()
+        elif self.hparams.llm_tuning == 'freeze':
+            for name, param in self.llama_model.named_parameters():
+                param.requires_grad = False
+        elif self.hparams.llm_tuning == 'freeze_lora':
+            if self.hparams.peft_dir:
+                self.llama_model = PeftModel.from_pretrained(self.llm_model, self.hparams.peft_dir, is_trainable=True)
+            else:
+                if self.hparams.peft_config:
+                    peft_config = LoraConfig(**LoraConfig.from_json_file(self.hparams.peft_config))
+                else:
+                    peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
+                                             inference_mode=False,
+                                             r=self.hparams.lora_r,
+                                             lora_alpha=self.hparams.lora_alpha,
+                                             lora_dropout=self.hparams.lora_dropout,
+                                             target_modules=['k_proj', 'v_proj', 'q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'])
+                self.peft_config = peft_config
+                self.llama_model = get_peft_model(self.llama_model, peft_config)
+            for name, param in self.llama_model.named_parameters():
+                param.requires_grad = False
+            self.llama_model.print_trainable_parameters()
+        else:
+            raise NotImplementedError()
  
-    #     print('Loading LLAMA Done')
+        print('Loading LLAMA Done')
 
     # def load_projector(self):
     #     name = self.hparams.model_name
