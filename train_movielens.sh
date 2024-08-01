@@ -1,3 +1,9 @@
+# 1小时等于3600秒
+SLEEP_SECONDS=3600
+
+# 睡眠1小时
+sleep $SLEEP_SECONDS
+
 CUDA_VISIBLE_DEVICES=1 python3 main.py \
 --mode train \
 --batch_size 8 \
