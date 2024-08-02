@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES=1 nohup python3 main.py \
 --max_epochs 5 \
 --precision bf16 > score.out &
 
-CUDA_VISIBLE_DEVICES=1 nohup python3 main.py \
+CUDA_VISIBLE_DEVICES=1 python3 main.py \
 --mode train \
 --batch_size 8 \
 --accumulate_grad_batches 8 \
@@ -34,7 +34,7 @@ CUDA_VISIBLE_DEVICES=1 nohup python3 main.py \
 --prompt_path /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
 --rec_embed SASRec \
 --llm_tuning lora \
---llm_path /mnt/bn/data-tns-live-llm/leon/datasets/llama-2-7b-bnb-4bit \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/llama-2-7b-bnb-4bit  \
 --rec_model_path ./rec_model/movielens.pt \
 --output_dir /mnt/bn/data-tns-live-llm/leon/datasets/rec/movielens_unsloth \
 --log_dir movielens_logs \
@@ -43,4 +43,4 @@ CUDA_VISIBLE_DEVICES=1 nohup python3 main.py \
 --lr_decay_min_lr 2e-6 \
 --max_epochs 5 \
 --precision bf16 \
---unsloth 1 > unsloth.out &
+--unsloth 1 

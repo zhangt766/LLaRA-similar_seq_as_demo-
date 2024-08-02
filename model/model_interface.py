@@ -32,24 +32,26 @@ from peft import (
 )
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
 
-score_instruct = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.
-
+score_instruct = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.\n
 Please output the similarity ratings in JSON format. Here is the format:
 {
     "Watch History 1": score,
 }\n"""
 
 score_history = """Candidate Watch History:
-{MOVIE_LISTS}
-
+{MOVIE_LISTS} \n
 Target Watch History:
-{TARGET_MOVIE}
-
+{TARGET_MOVIE} \n
 Please output the similarity ratings in JSON format. The output should only contain the JSON object with similarity scores, without any additional text. Output:"""
 
-reco_prompt_history = """Demo: One user has watched {SimilarHistory}. Based on this, He/She will likely choose {SimilarChoice} to watch next. \n"""
+reco_instruct = """You are a system that recommends movies based on viewing history. Please output the similarity ratings in the format below:
+['Recommendation': movie_name] \n
+Here are some similar users' watch history and their next movie likely be choosen and the warch history of this user.\n
+"""
 
-reco_prompt_instruct = """Task: The visit history of this user is: {HistoryHere}. Recommend one movie from the following set of titles: {CansHere}. The recommendation should contain one movie title only. Recommendation:"""
+reco_prompt_history = """Similar user {i}: He/She has watched {SimilarHistory}. Based on this, He/She will likely choose {SimilarChoice} to watch next. \n"""
+
+reco_prompt_instruct = """The visit history of this user is: {HistoryHere}. Recommend one movie from the following set of titles: {CansHere}. Output:"""
 
 TERMINATOR="\n"
 
@@ -115,20 +117,21 @@ class MInterface(pl.LightningModule):
         # similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
         similar_historys = input["most_similar_seq_name"][:5]
         similar_choices = input["most_similar_seq_next_name"][:5]
-        demos = [reco_prompt_history.format_map({"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for (similar_history,similar_choice) in zip(similar_historys, similar_choices)]
+        demos = [reco_prompt_history.format_map({"i":i,"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for i, (similar_history,similar_choice) in enumerate(zip(similar_historys, similar_choices))]
         demos = "".join(demos)
         instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
-        instruction = demos+" "+instruction
+        instruction = reco_instruct + demos+" "+instruction
         # print("instruction", instruction)
         return instruction
 
     def collate_fn(self, batch):
         cans_name = [input["cans_name"] for input in batch]
         inputs_text = [self.format_fn(input) for input in batch]
-        targets_text = [input["correct_answer"] + TERMINATOR for input in batch]
+        targets_text = ["['Recommendation': {}]{}".format(input['correct_answer'], self.llama_tokenizer.eos_token) for input in batch]
 
         if self.llama_model.training:
-            targets_text = [target_text + TERMINATOR for target_text in targets_text]
+            # print(targets_text)
+            # targets_text = [target_text + TERMINATOR for target_text in targets_text]
             inputs_pair = [[p, t] for p, t in zip(inputs_text, targets_text)]
             batch_tokens = self.llama_tokenizer(
                 inputs_pair,
@@ -156,6 +159,7 @@ class MInterface(pl.LightningModule):
                 
             }
         else:
+            # print(inputs_text)
             batch_tokens = self.llama_tokenizer(
                 inputs_text,
                 return_tensors="pt",
@@ -164,6 +168,11 @@ class MInterface(pl.LightningModule):
                 add_special_tokens=True,
                 return_attention_mask=True)
             cans_name = [sample['cans_name'] for sample in batch]
+
+            # effective_token_lengths = torch.sum(batch_tokens["attention_mask"], dim=1)
+            # average_effective_token_length = torch.mean(effective_token_lengths.float()).item()
+            # print(average_effective_token_length)
+
             # most_similar_seq_next=[sample['most_similar_seq_next'] for sample in batch]
             new_batch = {
                 "tokens": batch_tokens,
@@ -176,7 +185,6 @@ class MInterface(pl.LightningModule):
                 "cans_name": cans_name,
                 "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
                 "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
-                
             }
         return new_batch
     
@@ -305,10 +313,23 @@ class MInterface(pl.LightningModule):
         batch=self.batch_preprocess(batch)
         generate_output = self.generate(batch)
         output=[]
-        for i,generate in enumerate(generate_output):
-            real=batch['correct_answer'][i]
+        for i, generate in enumerate(generate_output):
+            # if i == 0: print(generate)
+            try: 
+                generate = generate.split("Output: [")[1].split(":")
+                if len(generate>2): generate = "".join(generate[1:])
+                else: generate = generate[1]
+                generate.split("]")[0].strip()
+            except: print("generation in bad format")
+
+            real = batch['correct_answer'][i].split(": ")
+            if len(real>2): real = "".join(real[1:])
+            else: real = real[1]
+
+            generate.split("]")[0].strip()[1].split("]")[0].strip()
+            # real=batch['correct_answer'][i]
             cans=batch['cans_name'][i]
-            generate=generate.strip().split("\n")[0]
+            # generate=generate.strip().split("\n")[0]
             output.append((generate,real,cans))
         return output
     
