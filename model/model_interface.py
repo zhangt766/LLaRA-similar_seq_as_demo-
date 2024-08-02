@@ -317,16 +317,18 @@ class MInterface(pl.LightningModule):
             # if i == 0: print(generate)
             try: 
                 generate = generate.split("Output: [")[1].split(":")
-                if len(generate>2): generate = "".join(generate[1:])
+                if len(generate)>2: generate = "".join(generate[1:])
                 else: generate = generate[1]
                 generate.split("]")[0].strip()
-            except: print("generation in bad format")
+            except: 
+                print("generation in bad format")
+                print(generate_output[i])
 
             real = batch['correct_answer'][i].split(": ")
-            if len(real>2): real = "".join(real[1:])
+            if len(real)>2: real = "".join(real[1:])
             else: real = real[1]
-
-            generate.split("]")[0].strip()[1].split("]")[0].strip()
+            real = real.split("]")[0].strip()
+            
             # real=batch['correct_answer'][i]
             cans=batch['cans_name'][i]
             # generate=generate.strip().split("\n")[0]
@@ -471,7 +473,9 @@ class MInterface(pl.LightningModule):
             self.llama_tokenizer.save_pretrained(self.score_model_path)
         else:
             self.llama_tokenizer = AutoTokenizer.from_pretrained(llm_path, model_max_length=self.model_max_length)
-            self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, load_in_4bit=True)
+            print(self.llama_tokenizer.padding_side)
+            self.llama_tokenizer.padding_side="left"
+            self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
         
     def load_llm(self, llm_path):
         print('Loading LLAMA')
