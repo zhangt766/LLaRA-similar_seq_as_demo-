@@ -1,16 +1,15 @@
-CUDA_VISIBLE_DEVICES=0 python main.py \
+CUDA_VISIBLE_DEVICES=2 python3 main.py \
 --mode test \
 --batch_size 4 \
 --accumulate_grad_batches 32 \
 --dataset movielens_data \
---data_dir data/ref/movielens \
+--data_dir /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/data/LLaRA/movielens \
 --cans_num 20 \
---prompt_path ./prompt/movie.txt \
+--prompt_path /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
 --rec_embed SASRec \
 --llm_tuning lora \
---llm_path ../llama/models_hf/7B \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/Meta-Llama-3.1-8B-Instruct \
 --rec_model_path ./rec_model/movielens.pt \
---ckpt_path ./checkpoints/movielens.ckpt \
 --output_dir ./output/movielens/ \
 --log_dir movielens_logs \
 --lr_warmup_start_lr 2e-6 \

@@ -69,8 +69,10 @@ def main(args):
     else:
         trainer.test(model=model, datamodule=data_module)
     
-    model.llama_model.save_pretrained(args.output_dir)
-    model.llama_tokenizer.save_pretrained(args.output_dir)
+    if args.mode == 'train':
+        model.llama_model = model.llama_model.merge_and_unload()
+        model.llama_model.save_pretrained(args.output_dir)
+        model.llama_tokenizer.save_pretrained(args.output_dir)
 
 
 if __name__ == '__main__':
@@ -131,6 +133,8 @@ if __name__ == '__main__':
     parser.add_argument('--lora_r', default=8, type=float)
     parser.add_argument('--lora_alpha', default=32, type=float)
     parser.add_argument('--lora_dropout', default=0.1, type=float)
+    parser.add_argument('--model_max_length', default=2048, type=int)
+    parser.add_argument('--unsloth', default=0, type=int)
 
     parser.add_argument('--num_sanity_val_steps', default=0, type=int)
 

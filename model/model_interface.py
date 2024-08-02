@@ -32,13 +32,18 @@ from peft import (
 )
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
 
-prompt = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.
+score_instruct = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.
 
-Candidate Watch History:
-{movie_lists}
+Please output the similarity ratings in JSON format. Here is the format:
+{
+    "Watch History 1": score,
+}\n"""
+
+score_history = """Candidate Watch History:
+{MOVIE_LISTS}
 
 Target Watch History:
-{target_movie}
+{TARGET_MOVIE}
 
 Please output the similarity ratings in JSON format. The output should only contain the JSON object with similarity scores, without any additional text. Output:"""
 
@@ -52,24 +57,32 @@ class MInterface(pl.LightningModule):
     def __init__(self, 
                  **kargs):
         super().__init__()
+        self.adapter_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter"
+        self.score_model_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model"
+        self.output_dir = kargs["output_dir"]
         self.save_hyperparameters()
+        self.model_max_length = kargs["model_max_length"]
         self.is_test = (kargs["mode"]=="test")
-        self.get_quant_model(self.hparams.llm_path)
-        self.copy_and_quantization()
+        self.unsloth = kargs["unsloth"]
+        if not self.unsloth: 
+            self.get_quant_model(self.hparams.llm_path)
+            if not self.is_test: self.get_score_model()
+        else: self.load_unsloth_llm(self.hparams.llm_path)
         self.batch_size = kargs["batch_size"]
         # self.load_rec_model(self.hparams.rec_model_path)
         # self.load_projector()
     
+    def get_score_model(self):
+        self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
+    
     def copy_and_quantization(self):
-        source_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter"
-        self.llama_model.save_pretrained(source_path)
-        self.score_model = LlamaForCausalLM.from_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/Llama-2-7b-hf")
+        self.llama_model.save_pretrained(self.adapter_path)
+        self.score_model = LlamaForCausalLM.from_pretrained(self.adapter_path)
         self.score_model.resize_token_embeddings(len(self.llama_tokenizer))
-        self.score_model = PeftModel.from_pretrained(self.score_model, source_path)
+        self.score_model = PeftModel.from_pretrained(self.score_model, self.adapter_path)
         self.score_model = self.score_model.merge_and_unload()
-        self.score_model.generation_config.pad_token_id = self.llama_tokenizer.eos_token_id
-        self.score_model.save_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model")
-        self.score_model = LlamaForCausalLM.from_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model", load_in_4bit=True)
+        self.score_model.save_pretrained(self.score_model_path)
+        self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
     
     # 对相似 demo 进行打分 TODO
     def score_demo(self, input):
@@ -78,26 +91,30 @@ class MInterface(pl.LightningModule):
         for i, name in enumerate(movie_list):
             movie_lists += f"Watch History {i+1}: {name} \n"
         target_movie = " ".join(input["seq_name"][:input["len_seq"]])
-        input_prompt = prompt.format_map({"movie_lists":movie_lists,"target_movie":target_movie})
+        # print(movie_lists)
+        input_prompt = score_instruct + score_history.format_map({"MOVIE_LISTS":movie_lists,"TARGET_MOVIE":target_movie})
+        # with open("/mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/tmp.txt","a") as f:
+        #     f.write(input_prompt)
         input = self.llama_tokenizer(input_prompt, return_tensors="pt")
-        output = self.score_model.generate(input_ids=input["input_ids"].cuda(),attention_mask=input["attention_mask"].cuda(),temperature=0.1, max_new_tokens=128).cpu()[0]
+        output = self.score_model.generate(input["input_ids"].cuda(), temperature=0.1, max_new_tokens=128, repetition_penalty=1.1).cpu()[0]
+        org_output = self.llama_tokenizer.decode(output)
         try:
-            output = json.loads("{"+self.llama_tokenizer.decode(output).split("{")[1].split("}")[0]+"}")
+            output = json.loads("{"+org_output.split("Output:")[1].split("{")[1].split("}")[0]+"}")
             sorted_items = sorted(output.items(), key=lambda item: item[1], reverse=True)
             # 获取分数最高的前5个键
             top_5_idx = [int(re.findall(r'\d+', item[0])[0])-1 for item in sorted_items[:5]]
             return top_5_idx
         except:
-            print("bad format, cant decode", self.llama_tokenizer.decode(output).split("Output:")[1])
+            print("bad format, cant decode")
         return random.sample(range(10),5)
     
     # tokenize
     def format_fn(self, input):
-        top_5_idx = self.score_demo(input)
-        similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
-        similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
-        # similar_historys = input["most_similar_seq_name"]
-        # similar_choices = input["most_similar_seq_next_name"]
+        # top_5_idx = self.score_demo(input)
+        # similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
+        # similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
+        similar_historys = input["most_similar_seq_name"][:5]
+        similar_choices = input["most_similar_seq_next_name"][:5]
         demos = [reco_prompt_history.format_map({"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for (similar_history,similar_choice) in zip(similar_historys, similar_choices)]
         demos = "".join(demos)
         instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
@@ -121,6 +138,11 @@ class MInterface(pl.LightningModule):
                 add_special_tokens=True,
                 return_attention_mask=True,
                 return_token_type_ids=True)
+
+            # effective_token_lengths = torch.sum(batch_tokens["attention_mask"], dim=1)
+            # average_effective_token_length = torch.mean(effective_token_lengths.float()).item()
+            # print(average_effective_token_length)
+
             # most_similar_seq_next=[sample['most_similar_seq_next'] for sample in batch]
             new_batch = {
                 "tokens": batch_tokens,
@@ -226,11 +248,15 @@ class MInterface(pl.LightningModule):
 
         #每1000step 更新 score model
         # print(batch_idx)
-        if (batch_idx+1)%1000==0: self.copy_and_quantization()
+        if (batch_idx+1)%1000==0: 
+            if not self.unsloth: self.copy_and_quantization()
+            else: 
+                self.llama_model.save_pretrained(self.output_dir)
+                self.llama_tokenizer.save_pretrained(self.output_dir)
         return loss
     
     def on_validation_epoch_start(self):
-        FastLanguageModel.for_inference(self.llama_model)
+        if self.unsloth: FastLanguageModel.for_inference(self.llama_model)
         self.val_content={
             "generate":[],
             "real":[],
@@ -256,7 +282,7 @@ class MInterface(pl.LightningModule):
             self.val_content["cans"].append(cans)
 
     def on_validation_epoch_end(self):
-        FastLanguageModel.for_training(self.llama_model)
+        if self.unsloth: FastLanguageModel.for_training(self.llama_model)
         df=DataFrame(self.val_content)
         if not os.path.exists(self.hparams.output_dir):
             os.makedirs(self.hparams.output_dir)
@@ -389,42 +415,49 @@ class MInterface(pl.LightningModule):
             FastLanguageModel.for_inference(self.llama_model)
     
     def get_quant_model(self, llm_path):
-        if torch.cuda.is_bf16_supported():
-            dtype = torch.bfloat16
+        if not self.is_test:
+            if torch.cuda.is_bf16_supported():
+                dtype = torch.bfloat16
+            else:
+                dtype = torch.float16
+
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=dtype,
+                bnb_4bit_use_double_quant=True,
+            )
+            self.llama_tokenizer = AutoTokenizer.from_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/Llama-2-7b-hf", model_max_length=self.model_max_length)
+            self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+            self.llama_tokenizer.padding_side="left"
+            self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+
+            self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, quantization_config=quantization_config)
+            self.llama_model = prepare_model_for_kbit_training(self.llama_model)
+            self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+            self.llama_model.generation_config.pad_token_id = self.llama_tokenizer.eos_token_id
+
+            peft_config = LoraConfig(
+                r=16,
+                lora_alpha=16,
+                lora_dropout=0,
+                target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            self.llama_model = get_peft_model(self.llama_model, peft_config)
+            self.llama_model.print_trainable_parameters()
+            self.llama_tokenizer.save_pretrained(self.score_model_path)
         else:
-            dtype = torch.float16
-
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=dtype,
-            bnb_4bit_use_double_quant=True,
-        )
-        self.llama_tokenizer = AutoTokenizer.from_pretrained(llm_path, model_max_length=1024)
-        self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
-        self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        self.llama_tokenizer.padding_side = "right"
-
-        self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, quantization_config=quantization_config)
-        self.llama_model = prepare_model_for_kbit_training(self.llama_model)
-        self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
-        peft_config = LoraConfig(
-            r=16,
-            lora_alpha=16,
-            lora_dropout=0,
-            target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        self.llama_model = get_peft_model(self.llama_model, peft_config)
-        self.llama_model.print_trainable_parameters()
+            self.llama_tokenizer = AutoTokenizer.from_pretrained(llm_path, model_max_length=self.model_max_length)
+            self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, load_in_4bit=True)
         
     def load_llm(self, llm_path):
         print('Loading LLAMA')
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(llm_path, use_fast=False)
         self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
         self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        self.llama_tokenizer.padding_side = "right"
+        self.llama_tokenizer.padding_side = "left"
         # self.llama_tokenizer.add_special_tokens({'additional_special_tokens': ['[PH]','[HistoryEmb]','[CansEmb]','[ItemEmb]']})
         self.llama_tokenizer.add_special_tokens({
         'additional_special_tokens': [
