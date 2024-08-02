@@ -112,11 +112,14 @@ class MInterface(pl.LightningModule):
     
     # tokenize
     def format_fn(self, input):
-        # top_5_idx = self.score_demo(input)
-        # similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
-        # similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
-        similar_historys = input["most_similar_seq_name"][:5]
-        similar_choices = input["most_similar_seq_next_name"][:5]
+        if not self.unsloth:
+            top_5_idx = self.score_demo(input)
+            similar_historys = [input["most_similar_seq_name"][idx] for idx in top_5_idx]
+            similar_choices = [input["most_similar_seq_next_name"][idx] for idx in top_5_idx]
+        else:
+            similar_historys = input["most_similar_seq_name"][:5]
+            similar_choices = input["most_similar_seq_next_name"][:5]
+            
         demos = [reco_prompt_history.format_map({"i":i,"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for i, (similar_history,similar_choice) in enumerate(zip(similar_historys, similar_choices))]
         demos = "".join(demos)
         instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})

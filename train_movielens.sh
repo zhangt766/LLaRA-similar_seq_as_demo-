@@ -4,7 +4,7 @@ SLEEP_SECONDS=3600
 # 睡眠1小时
 sleep $SLEEP_SECONDS
 
-CUDA_VISIBLE_DEVICES=1 nohup python3 main.py \
+CUDA_VISIBLE_DEVICES=2 python3 main.py \
 --mode train \
 --batch_size 8 \
 --accumulate_grad_batches 8 \
@@ -22,7 +22,8 @@ CUDA_VISIBLE_DEVICES=1 nohup python3 main.py \
 --lr 2e-4 \
 --lr_decay_min_lr 2e-6 \
 --max_epochs 5 \
---precision bf16 > score.out &
+--precision bf16 \
+--unsloth 0
 
 CUDA_VISIBLE_DEVICES=1 python3 main.py \
 --mode train \
