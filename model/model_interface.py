@@ -34,9 +34,7 @@ from transformers import AutoModelForCausalLM, LlamaForCausalLM
 
 score_instruct = """You are a system that recommends movies based on viewing history. Please evaluate the similarity between each watch history in the candidate list and the single target watch history. Rate the similarity on a scale from 1 to 10 between , where 1 is not similar at all and 10 is very similar.\n
 Please output the similarity ratings in JSON format. Here is the format:
-{
-    "Watch History 1": score,
-}\n"""
+["Watch History 1": score, "Watch History 2": score, "Watch History 3": score, "Watch History 4": score, "Watch History 5": score, "Watch History 6": score, "Watch History 7": score, "Watch History 8": score, "Watch History 9": score, "Watch History 10": score]\n"""
 
 score_history = """Candidate Watch History:
 {MOVIE_LISTS} \n
@@ -53,7 +51,7 @@ reco_prompt_history = """Similar user {i}: He/She has watched {SimilarHistory}. 
 
 reco_prompt_instruct = """The visit history of this user is: {HistoryHere}. Recommend one movie from the following set of titles: {CansHere}. Output:"""
 
-TERMINATOR="\n"
+# TERMINATOR="\n"
 
 class MInterface(pl.LightningModule):
     def __init__(self, 
@@ -76,10 +74,10 @@ class MInterface(pl.LightningModule):
     
     def get_score_model(self):
         self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
-    
+
     def copy_and_quantization(self):
         self.llama_model.save_pretrained(self.adapter_path)
-        self.score_model = LlamaForCausalLM.from_pretrained(self.adapter_path)
+        self.score_model = LlamaForCausalLM.from_pretrained(self.hparams.llm_path)
         self.score_model.resize_token_embeddings(len(self.llama_tokenizer))
         self.score_model = PeftModel.from_pretrained(self.score_model, self.adapter_path)
         self.score_model = self.score_model.merge_and_unload()
@@ -98,16 +96,40 @@ class MInterface(pl.LightningModule):
         # with open("/mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/tmp.txt","a") as f:
         #     f.write(input_prompt)
         input = self.llama_tokenizer(input_prompt, return_tensors="pt")
+
+        # effective_token_lengths = torch.sum(input["attention_mask"], dim=1)
+        # average_effective_token_length = torch.mean(effective_token_lengths.float()).item()
+        # print(average_effective_token_length)
+
         output = self.score_model.generate(input["input_ids"].cuda(), temperature=0.1, max_new_tokens=128, repetition_penalty=1.1).cpu()[0]
         org_output = self.llama_tokenizer.decode(output)
         try:
-            output = json.loads("{"+org_output.split("Output:")[1].split("{")[1].split("}")[0]+"}")
-            sorted_items = sorted(output.items(), key=lambda item: item[1], reverse=True)
+            output = "["+org_output.split("Output:")[1].split("[")[1].split("]")[0]+"]"
+            output = output.strip("[]")
+            # 提取键值对，并处理键中的单引号
+            matches = re.findall(r"'(.*?)'\s*:\s*([\d.]+)", output)
+            # 转换为字典，数值转换为浮点数
+            output = {key.replace("\\'", "'"): float(value) for key, value in matches}
+            # print(output)
+            data_list = list(output.items())[:10]
+            # 按评分进行排序（从高到低）。由于值都是浮点数，所以直接用sorted排序。
+            sorted_data_list = sorted(data_list, key=lambda x: x[1], reverse=True)
+            # 提取排序后前 5 个评分对应的索引
+            top_5_idx = [data_list.index(item) for item in sorted_data_list[:5]]
+
+            # output = json.loads(output)
+            # scores = re.findall(r':\s*([\d.]+)', output)[:10]
+            # scores = np.array([-int(score) for score in scores])
+            # print(scores)
+            # top_5_idx = np.argsort(scores)[:5]
+
             # 获取分数最高的前5个键
-            top_5_idx = [int(re.findall(r'\d+', item[0])[0])-1 for item in sorted_items[:5]]
+            # sorted_items = sorted(output.items(), key=lambda item: item[1], reverse=True)
+            # top_5_idx = [int(re.findall(r'\d+', item[0])[0])-1 for item in sorted_items[:5]]
             return top_5_idx
-        except:
-            print("bad format, cant decode")
+        except Exception as e:
+            print(e)
+            # print("bad format, cant decode")
         return random.sample(range(10),5)
     
     # tokenize
@@ -119,7 +141,7 @@ class MInterface(pl.LightningModule):
         else:
             similar_historys = input["most_similar_seq_name"][:5]
             similar_choices = input["most_similar_seq_next_name"][:5]
-            
+
         demos = [reco_prompt_history.format_map({"i":i,"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for i, (similar_history,similar_choice) in enumerate(zip(similar_historys, similar_choices))]
         demos = "".join(demos)
         instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
@@ -454,7 +476,7 @@ class MInterface(pl.LightningModule):
                 bnb_4bit_use_double_quant=True,
             )
             self.llama_tokenizer = AutoTokenizer.from_pretrained("/mnt/bn/data-tns-live-llm/leon/datasets/Llama-2-7b-hf", model_max_length=self.model_max_length)
-            self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+            # self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
             self.llama_tokenizer.padding_side="left"
             self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
@@ -476,9 +498,14 @@ class MInterface(pl.LightningModule):
             self.llama_tokenizer.save_pretrained(self.score_model_path)
         else:
             self.llama_tokenizer = AutoTokenizer.from_pretrained(llm_path, model_max_length=self.model_max_length)
-            print(self.llama_tokenizer.padding_side)
             self.llama_tokenizer.padding_side="left"
+            # self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+            self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            print(self.llama_tokenizer.pad_token)
             self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
+            self.llama_model = PeftModel.from_pretrained(self.llama_model, self.adapter_path, is_trainable=False)
+            self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+            self.score_model = self.llama_model
         
     def load_llm(self, llm_path):
         print('Loading LLAMA')

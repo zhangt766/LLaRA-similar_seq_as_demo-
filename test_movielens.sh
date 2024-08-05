@@ -28,7 +28,7 @@ CUDA_VISIBLE_DEVICES=2 python3 main.py \
 --prompt_path /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
 --rec_embed SASRec \
 --llm_tuning lora \
---llm_path LEON24/recommend \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/Llama-2-7b-hf \
 --rec_model_path ./rec_model/movielens.pt \
 --output_dir ./output/movielens/ \
 --log_dir movielens_logs \
@@ -36,4 +36,4 @@ CUDA_VISIBLE_DEVICES=2 python3 main.py \
 --lr 2e-4 \
 --lr_decay_min_lr 2e-6 \
 --max_epochs 5 \
---unsloth 1
+--unsloth 0
