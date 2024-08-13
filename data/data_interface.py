@@ -87,8 +87,6 @@ class TrainCollater:
                   
                 inputs_text[i]=input_text
             flag = True
-            
-
         self.cur_step += 1
         
 
@@ -115,7 +113,6 @@ class TrainCollater:
                 "flag": flag,
                 "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
                 "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
-                
             }
         else:
             batch_tokens = self.llm_tokenizer(

@@ -101,14 +101,17 @@ class MovielensData(data.Dataset):
             return x[0]
         def get_id_from_list(x):
             return [i[0] for i in x]
+        def get_id_from_2dlist(x):
+            result = []
+            for input in x:
+                result.append(get_id_from_list(input))
+            return result
 
         train_data['next'] = train_data['next'].apply(get_id_from_tumple)
         train_data['seq'] = train_data['seq'].apply(get_id_from_list)
         train_data['seq_unpad']=train_data['seq_unpad'].apply(get_id_from_list)
-        train_data['most_similar_seq_next'] = train_data['most_similar_seq_next'].apply(get_id_from_tumple)
-        train_data['most_similar_seq'] = train_data['most_similar_seq'].apply(get_id_from_tumple)
-       
-
+        train_data['most_similar_seq_next'] = train_data['most_similar_seq_next'].apply(get_id_from_list)
+        train_data['most_similar_seq'] = train_data['most_similar_seq'].apply(get_id_from_2dlist)
+        # print(train_data['most_similar_seq'].tolist()[:2])
+        # print(train_data['most_similar_seq_next'].tolist()[:2])
         return train_data
-        
-

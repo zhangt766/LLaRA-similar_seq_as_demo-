@@ -69,8 +69,8 @@ class MInterface(pl.LightningModule):
             if not self.is_test: self.get_score_model()
         else: self.load_unsloth_llm(self.hparams.llm_path)
         self.batch_size = kargs["batch_size"]
-        # self.load_rec_model(self.hparams.rec_model_path)
-        # self.load_projector()
+        self.load_rec_model(self.hparams.rec_model_path)
+        self.load_projector()
     
     def get_score_model(self):
         self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
@@ -141,15 +141,30 @@ class MInterface(pl.LightningModule):
         else:
             similar_historys = input["most_similar_seq_name"][:5]
             similar_choices = input["most_similar_seq_next_name"][:5]
+        
+        def format_similar_history(input):
+            return ", ".join([seq_title + ' [SimilarHistoryEmb]' for seq_title in input])
+            
+        def format_similar_choice(input):
+            return input + ' [SimilarChoiceEmb]'
+        
+        # 添加 Emb token
+        similar_historys = [format_similar_history(similar_history) for similar_history in similar_historys]
+        similar_choices = [format_similar_choice(similar_choice) for similar_choice in similar_choices]
+        history_here = ", ".join([seq_title+' [HistoryEmb]' for seq_title in input['seq_name']])
+        cans_here = ", ".join([can_title+' [CansEmb]' for can_title in input['cans_name']])
 
         demos = [reco_prompt_history.format_map({"i":i,"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for i, (similar_history,similar_choice) in enumerate(zip(similar_historys, similar_choices))]
         demos = "".join(demos)
-        instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
+        instruction = reco_prompt_instruct.format_map({"HistoryHere":history_here, "CansHere":cans_here})
         instruction = reco_instruct + demos+" "+instruction
         # print("instruction", instruction)
         return instruction
 
     def collate_fn(self, batch):
+        # print("batch ", batch)
+        # print("batch most similar seq",[sample["most_similar_seq"] for sample in batch])
+        # print("batch most similar seq next",[sample["most_similar_seq_next"] for sample in batch])
         cans_name = [input["cans_name"] for input in batch]
         inputs_text = [self.format_fn(input) for input in batch]
         targets_text = ["['Recommendation': {}]{}".format(input['correct_answer'], self.llama_tokenizer.eos_token) for input in batch]
@@ -158,6 +173,7 @@ class MInterface(pl.LightningModule):
             # print(targets_text)
             # targets_text = [target_text + TERMINATOR for target_text in targets_text]
             inputs_pair = [[p, t] for p, t in zip(inputs_text, targets_text)]
+
             batch_tokens = self.llama_tokenizer(
                 inputs_pair,
                 return_tensors="pt",
@@ -172,6 +188,9 @@ class MInterface(pl.LightningModule):
             # print(average_effective_token_length)
 
             # most_similar_seq_next=[sample['most_similar_seq_next'] for sample in batch]
+            with open("./log.txt","a") as f:
+                f.write(json.dumps(f"inputs pair: {inputs_pair} \n"))
+ 
             new_batch = {
                 "tokens": batch_tokens,
                 "seq": torch.stack([torch.tensor(sample['seq']) for sample in batch], dim=0),
@@ -181,7 +200,6 @@ class MInterface(pl.LightningModule):
                 "item_id": torch.stack([torch.tensor(sample['item_id']) for sample in batch], dim=0),
                 "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
                 "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
-                
             }
         else:
             # print(inputs_text)
@@ -211,6 +229,10 @@ class MInterface(pl.LightningModule):
                 "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
                 "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
             }
+        
+        # tmp1 = new_batch['most_similar_seq'].shape
+        # tmp2 = new_batch['most_similar_seq_next'].shape
+        # print(f"most_similar_seq {tmp1} most_similar_seq_next {tmp2}")
         return new_batch
     
     def batch_preprocess(self, batch):
@@ -443,6 +465,18 @@ class MInterface(pl.LightningModule):
             load_in_4bit = True,
         )
 
+        self.llama_tokenizer.add_special_tokens({
+            'additional_special_tokens': [
+                '[PH]',
+                '[HistoryEmb]',
+                '[CansEmb]',
+                '[ItemEmb]',
+                '[SimilarHistoryEmb]',
+                '[SimilarChoiceEmb]'
+            ]
+        })
+        self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+
         if not self.is_test:
             self.llama_model = FastLanguageModel.get_peft_model(
                 self.llama_model,
@@ -479,6 +513,16 @@ class MInterface(pl.LightningModule):
             # self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
             self.llama_tokenizer.padding_side="left"
             self.llama_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            self.llama_tokenizer.add_special_tokens({
+                'additional_special_tokens': [
+                    '[PH]',
+                    '[HistoryEmb]',
+                    '[CansEmb]',
+                    '[ItemEmb]',
+                    '[SimilarHistoryEmb]',
+                    '[SimilarChoiceEmb]'
+                ]
+            })
 
             self.llama_model = AutoModelForCausalLM.from_pretrained(llm_path, quantization_config=quantization_config)
             self.llama_model = prepare_model_for_kbit_training(self.llama_model)
@@ -515,15 +559,15 @@ class MInterface(pl.LightningModule):
         self.llama_tokenizer.padding_side = "left"
         # self.llama_tokenizer.add_special_tokens({'additional_special_tokens': ['[PH]','[HistoryEmb]','[CansEmb]','[ItemEmb]']})
         self.llama_tokenizer.add_special_tokens({
-        'additional_special_tokens': [
-            '[PH]',
-            '[HistoryEmb]',
-            '[CansEmb]',
-            '[ItemEmb]',
-            '[SimilarHistoryEmb]',
-            '[SimilarChoiceEmb]'
-        ]
-    })
+            'additional_special_tokens': [
+                '[PH]',
+                '[HistoryEmb]',
+                '[CansEmb]',
+                '[ItemEmb]',
+                '[SimilarHistoryEmb]',
+                '[SimilarChoiceEmb]'
+            ]
+        })
         self.llama_model = LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=torch.bfloat16)
         self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
         if self.hparams.llm_tuning == 'lora':
@@ -568,36 +612,37 @@ class MInterface(pl.LightningModule):
  
         print('Loading LLAMA Done')
 
-    # def load_projector(self):
-    #     name = self.hparams.model_name
-    #     camel_name = ''.join([i.capitalize() for i in name.split('_')])
-    #     try:
-    #         Model = getattr(importlib.import_module(
-    #             '.'+name, package=__package__), camel_name)
-    #     except:
-    #         raise ValueError(
-    #             f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
-    #     self.projector = self.instancialize(Model, rec_size=self.hparams.rec_size, llm_size=self.llama_model.config.hidden_size)
+    def load_projector(self):
+        name = self.hparams.model_name
+        camel_name = ''.join([i.capitalize() for i in name.split('_')])
+        try:
+            Model = getattr(importlib.import_module(
+                '.'+name, package=__package__), camel_name)
+        except:
+            raise ValueError(
+                f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
+        self.projector = self.instancialize(Model, rec_size=self.hparams.rec_size, llm_size=self.llama_model.config.hidden_size)
 
-    # def instancialize(self, Model, **other_args):
-    #     class_args = inspect.getargspec(Model.__init__).args[1:]
-    #     inkeys = self.hparams.keys()
-    #     args1 = {}
-    #     for arg in class_args:
-    #         if arg in inkeys:
-    #             args1[arg] = getattr(self.hparams, arg)
-    #     args1.update(other_args)
-    #     return Model(**args1)
+    def instancialize(self, Model, **other_args):
+        class_args = inspect.getargspec(Model.__init__).args[1:]
+        inkeys = self.hparams.keys()
+        args1 = {}
+        for arg in class_args:
+            if arg in inkeys:
+                args1[arg] = getattr(self.hparams, arg)
+        args1.update(other_args)
+        return Model(**args1)
 
-    # def load_rec_model(self, rec_model_path):
-    #     print('Loading Rec Model')
-    #     self.rec_model = torch.load(rec_model_path, map_location="cpu")
-    #     self.rec_model.eval()
-    #     for name, param in self.rec_model.named_parameters():
-    #         param.requires_grad = False
-    #     print('Loding Rec model Done')
+    def load_rec_model(self, rec_model_path):
+        print('Loading Rec Model')
+        self.rec_model = torch.load(rec_model_path, map_location="cpu")
+        self.rec_model.eval()
+        for name, param in self.rec_model.named_parameters():
+            param.requires_grad = False
+        print('Loding Rec model Done')
 
     def encode_items(self, seq):
+        seq = seq.cuda()
         if self.hparams.rec_embed=="SASRec":
             item_rec_embs=self.rec_model.cacu_x(seq)
         elif self.hparams.rec_embed in ['Caser','GRU']:
@@ -610,16 +655,16 @@ class MInterface(pl.LightningModule):
         return embeds
 
     def wrap_emb(self, batch):
-        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids)
-        return input_embeds
+        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
+        # return input_embeds
         # his_token_id=self.llama_tokenizer("[HistoryEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # cans_token_id=self.llama_tokenizer("[CansEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # item_token_id=self.llama_tokenizer("[ItemEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
-        
         # his_item_embeds= self.encode_items(batch["seq"])
         # cans_item_embeds= self.encode_items(batch["cans"])
         # item_embeds=self.encode_items(batch["item_id"])
-    # 获取所有特殊标记的 token_id
+
+        # 获取所有特殊标记的 token_id
         his_token_id = self.llama_tokenizer("[HistoryEmb]", return_tensors="pt", add_special_tokens=False).input_ids.item()
         cans_token_id = self.llama_tokenizer("[CansEmb]", return_tensors="pt", add_special_tokens=False).input_ids.item()
         item_token_id = self.llama_tokenizer("[ItemEmb]", return_tensors="pt", add_special_tokens=False).input_ids.item()
@@ -630,9 +675,10 @@ class MInterface(pl.LightningModule):
         his_item_embeds = self.encode_items(batch["seq"])
         cans_item_embeds = self.encode_items(batch["cans"])
         item_embeds = self.encode_items(batch["item_id"])
-        
         similar_history_embeds = self.encode_items(batch["most_similar_seq"])
+        # print(f"similar_history_embeds {similar_history_embeds.shape}")
         similar_choice_embeds = self.encode_items(batch["most_similar_seq_next"])
+        # print(f"similar_choice_embeds {similar_choice_embeds.shape}")
                 
         # for i in range(len(batch["len_seq"])):
         #     if (batch["tokens"].input_ids[i]==his_token_id).nonzero().shape[0]>0:
@@ -646,6 +692,7 @@ class MInterface(pl.LightningModule):
         #     if (batch["tokens"].input_ids[i]==item_token_id).nonzero().shape[0]>0:
         #         idx=(batch["tokens"].input_ids[i]==item_token_id).nonzero().item()
         #         input_embeds[i,idx]=item_embeds[i]
+                
         for i in range(len(batch["len_seq"])):
             # 处理 [HistoryEmb] 标记
             if (batch["tokens"].input_ids[i] == his_token_id).nonzero().shape[0] > 0:
@@ -666,14 +713,24 @@ class MInterface(pl.LightningModule):
             
             # 处理 [SimilarHistoryEmb] 标记
             if (batch["tokens"].input_ids[i] == similar_history_token_id).nonzero().shape[0] > 0:
-                idx_tensor = (batch["tokens"].input_ids[i] == similar_history_token_id).nonzero().view(-1)
-                for idx, item_emb in zip(idx_tensor, similar_history_embeds[i, :batch["len_seq"][i].item()]):
-                    input_embeds[i, idx] = item_emb
+                idx_tensor = (batch["tokens"].input_ids[i] == similar_history_token_id).nonzero().view(5,-1) #只有5个similar history
+                # print(f"idx_tensor {idx_tensor} \n shape {idx_tensor.shape}")
+                tmp=batch["len_seq"][i].item()
+                # print(f"len_seq {tmp}")
+                # print(f"similar_history_embeds {similar_history_embeds.shape}")
+                for idxs, item_embs in zip(idx_tensor, similar_history_embeds[i, :5]): #这里看是否进行打分排序，如果不打分就直接选择前5 个
+                    for idx, item_emb in zip(idxs, item_embs):
+                        tmp=input_embeds[i, idx]
+                        # print(f"input_embeds {tmp.shape}")
+                        # print(f"item_emb {item_emb.shape}")
+                        input_embeds[i, idx] = item_emb
+                    # input_embeds[i, idx] = item_emb
             
             # 处理 [SimilarChoiceEmb] 标记
             if (batch["tokens"].input_ids[i] == similar_choice_token_id).nonzero().shape[0] > 0:
-                idx = (batch["tokens"].input_ids[i] == similar_choice_token_id).nonzero().item()
-                input_embeds[i, idx] = similar_choice_embeds[i]
+                idxs = (batch["tokens"].input_ids[i] == similar_choice_token_id).nonzero().view(-1)
+                for idx, similar_choice_embed in zip(idxs,similar_choice_embeds[i][:5]):
+                    input_embeds[i, idx] = similar_choice_embed
     
         return input_embeds
      
