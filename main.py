@@ -10,7 +10,7 @@ from data.data_interface import DInterface
 from recommender.A_SASRec_final_bce_llm import SASRec, Caser, GRU
 from SASRecModules_ori import *
 from transformers import LlamaForCausalLM, LlamaTokenizer
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 def load_callbacks(args):
     callbacks = []
     callbacks.append(plc.EarlyStopping(
@@ -68,19 +68,24 @@ def main(args):
         trainer.fit(model=model, datamodule=data_module)
     else:
         trainer.test(model=model, datamodule=data_module)
+    
+    if args.mode == 'train':
+        model.llama_model = model.llama_model.merge_and_unload()
+        model.llama_model.save_pretrained(args.output_dir)
+        model.llama_tokenizer.save_pretrained(args.output_dir)
 
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('spawn')
+    # torch.multiprocessing.set_start_method('spawn')
     parser = ArgumentParser()
 
     parser.add_argument('--accelerator', default='gpu', type=str)
     parser.add_argument('--devices', default=-1, type=int)
-    parser.add_argument('--precision', default=16, type=int)
+    parser.add_argument('--precision', default=16)
     parser.add_argument('--amp_backend', default="native", type=str)
 
     parser.add_argument('--batch_size', default=8, type=int)
-    parser.add_argument('--num_workers', default=8, type=int)
+    parser.add_argument('--num_workers', default=128, type=int)
     parser.add_argument('--seed', default=1234, type=int)
     parser.add_argument('--lr', default=1e-3, type=float)
     parser.add_argument('--accumulate_grad_batches', default=8, type=int)
@@ -128,6 +133,10 @@ if __name__ == '__main__':
     parser.add_argument('--lora_r', default=8, type=float)
     parser.add_argument('--lora_alpha', default=32, type=float)
     parser.add_argument('--lora_dropout', default=0.1, type=float)
+    parser.add_argument('--model_max_length', default=2048, type=int)
+    parser.add_argument('--unsloth', default=0, type=int)
+
+    parser.add_argument('--num_sanity_val_steps', default=0, type=int)
 
     args = parser.parse_args()
     

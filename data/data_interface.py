@@ -10,6 +10,7 @@ import torch
 import argparse
 from transformers import LlamaForCausalLM, LlamaTokenizer
 import os
+import json
 
 
 class TrainCollater:
@@ -27,6 +28,7 @@ class TrainCollater:
         self.cur_step = 1
 
     def __call__(self, batch):
+        return batch
         if isinstance(self.prompt_list, list):
             instruction = random.choice(self.prompt_list)
             inputs_text = [instruction] * len(batch)
@@ -34,14 +36,13 @@ class TrainCollater:
             instruction = sample["instruction_input"] if "instruction_input" in sample else None
             inputs_text = [instruction] * len(batch) if isinstance(instruction, list) else [instruction] * len(batch)
         
-
-                
-                 
         thresh_hold = self.cur_step / self.max_step
         p = random.random()
-
         if p > thresh_hold:
             for i, sample in enumerate(batch):
+                print(sample["cans_name"])
+                # 构造prompt
+                input_text = f""""""
                 input_text=inputs_text[i]
                 if '[HistoryHere]' in input_text:
                     insert_prompt=", ".join([seq_title+' [HistoryEmb]' for seq_title in sample['seq_name']])
@@ -50,7 +51,12 @@ class TrainCollater:
                     insert_prompt=", ".join([can_title+' [CansEmb]' for can_title in sample['cans_name']])
                     input_text=input_text.replace('[CansHere]',insert_prompt)  
                 if '[SimilarHistory]' in input_text:
-                    similar_history = ", ".join([seq_title + ' [SimilarHistoryEmb]' for seq_title in sample['most_similar_seq_name']])
+                    try:
+                        similar_history = ", ".join([seq_title + ' [SimilarHistoryEmb]' for seq_title in json.loads(sample['most_similar_seq_name'])])
+                    except:
+                        print((sample['most_similar_seq_name']))
+                        print(type(sample['most_similar_seq_name']))
+                        
                     input_text = input_text.replace('[SimilarHistory]', similar_history)
                 if '[SimilarChoice]' in input_text:
                     similar_choice = sample['most_similar_seq_next_name'] + ' [SimilarChoiceEmb]'
@@ -68,7 +74,12 @@ class TrainCollater:
                     input_text=input_text.replace('[CansHere]',insert_prompt)  
                     
                 if '[SimilarHistory]' in input_text:
-                    similar_history = ", ".join([seq_title + ' [PH]' for seq_title in sample['most_similar_seq_name']])
+                    try:
+                        similar_history = ", ".join([seq_title + ' [PH]' for seq_title in json.loads(sample['most_similar_seq_name'])])
+                    except:
+                        print((sample['most_similar_seq_name']))
+                        print(type(sample['most_similar_seq_name']))
+
                     input_text = input_text.replace('[SimilarHistory]', similar_history)
                 if '[SimilarChoice]' in input_text:
                     similar_choice = sample['most_similar_seq_next_name'] + ' [PH]'
@@ -76,8 +87,6 @@ class TrainCollater:
                   
                 inputs_text[i]=input_text
             flag = True
-            
-
         self.cur_step += 1
         
 
@@ -104,7 +113,6 @@ class TrainCollater:
                 "flag": flag,
                 "most_similar_seq": torch.stack([torch.tensor(sample['most_similar_seq']) for sample in batch], dim=0),
                 "most_similar_seq_next": torch.stack([torch.tensor(sample['most_similar_seq_next']) for sample in batch], dim=0)
-                
             }
         else:
             batch_tokens = self.llm_tokenizer(
@@ -152,7 +160,8 @@ class DInterface(pl.LightningDataModule):
         self.trainset = self.instancialize(stage='train')
         self.valset = self.instancialize(stage='val')
         self.testset = self.instancialize(stage='test')
-        self.max_steps = self.max_epochs * (len(self.trainset) // self.batch_size) // self.num_workers
+        # self.max_steps = self.max_epochs * (len(self.trainset) // self.batch_size) // self.num_workers
+        self.max_steps = self.max_epochs * (len(self.trainset) // self.batch_size) 
 
     def train_dataloader(self):
         return DataLoader(self.trainset,
