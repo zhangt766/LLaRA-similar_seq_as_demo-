@@ -188,8 +188,8 @@ class MInterface(pl.LightningModule):
             # print(average_effective_token_length)
 
             # most_similar_seq_next=[sample['most_similar_seq_next'] for sample in batch]
-            with open("./log.txt","a") as f:
-                f.write(json.dumps(f"inputs pair: {inputs_pair} \n"))
+            # with open("./log.txt","a") as f:
+            #     f.write(json.dumps(f"inputs pair: {inputs_pair} \n"))
  
             new_batch = {
                 "tokens": batch_tokens,
@@ -289,12 +289,16 @@ class MInterface(pl.LightningModule):
         batch=self.batch_preprocess(batch)
         if self.scheduler:
             self.scheduler.step(self.trainer.global_step, self.current_epoch, self.trainer.max_steps)
+        
         # if batch["flag"]:
         #     for name, param in self.projector.named_parameters():
         #         param.requires_grad = False
         # else:
         #     for name, param in self.projector.named_parameters():
         #         param.requires_grad = True
+        for name, param in self.projector.named_parameters():
+            param.requires_grad = True
+
         out = self(batch)
         loss = self.configure_loss(out)
         self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
@@ -405,7 +409,7 @@ class MInterface(pl.LightningModule):
         else:
             weight_decay = 0
         optimizer = torch.optim.Adam([
-            # {'params': self.projector.parameters(), 'lr': self.hparams.lr, 'weight_decay':weight_decay},
+            {'params': self.projector.parameters(), 'lr': self.hparams.lr, 'weight_decay':weight_decay},
             {'params': self.llama_model.parameters(), 'lr': self.hparams.lr}
         ])
 
@@ -458,24 +462,44 @@ class MInterface(pl.LightningModule):
             dtype = torch.float16
         dtype=None
 
-        self.llama_model, self.llama_tokenizer = FastLanguageModel.from_pretrained(
-            model_name = llm_path,
-            max_seq_length = max_seq_length,
-            dtype = dtype,
-            load_in_4bit = True,
-        )
+        if not self.is_test:
+            self.llama_model, self.llama_tokenizer = FastLanguageModel.from_pretrained(
+                model_name = llm_path,
+                max_seq_length = max_seq_length,
+                dtype = dtype,
+                load_in_4bit = True,
+            )
 
-        self.llama_tokenizer.add_special_tokens({
-            'additional_special_tokens': [
-                '[PH]',
-                '[HistoryEmb]',
-                '[CansEmb]',
-                '[ItemEmb]',
-                '[SimilarHistoryEmb]',
-                '[SimilarChoiceEmb]'
-            ]
-        })
-        self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+            self.llama_tokenizer.add_special_tokens({
+                'additional_special_tokens': [
+                    '[PH]',
+                    '[HistoryEmb]',
+                    '[CansEmb]',
+                    '[ItemEmb]',
+                    '[SimilarHistoryEmb]',
+                    '[SimilarChoiceEmb]'
+                ]
+            })
+            self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+        else:
+            self.llama_model, self.llama_tokenizer = FastLanguageModel.from_pretrained(
+                model_name = "/mnt/bn/data-tns-live-llm/leon/datasets/llama-2-7b-bnb-4bit/",
+                max_seq_length = max_seq_length,
+                dtype = dtype,
+                load_in_4bit = True,
+            )
+            self.llama_tokenizer.add_special_tokens({
+                'additional_special_tokens': [
+                    '[PH]',
+                    '[HistoryEmb]',
+                    '[CansEmb]',
+                    '[ItemEmb]',
+                    '[SimilarHistoryEmb]',
+                    '[SimilarChoiceEmb]'
+                ]
+            })
+            self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+            self.llama_model = PeftModel.from_pretrained(self.llama_model,llm_path)
 
         if not self.is_test:
             self.llama_model = FastLanguageModel.get_peft_model(
@@ -693,7 +717,7 @@ class MInterface(pl.LightningModule):
         #         idx=(batch["tokens"].input_ids[i]==item_token_id).nonzero().item()
         #         input_embeds[i,idx]=item_embeds[i]
                 
-        for i in range(len(batch["len_seq"])):
+        for i in range(len(batch["len_seq"])): #对batch遍历 i in [0,7]
             # 处理 [HistoryEmb] 标记
             if (batch["tokens"].input_ids[i] == his_token_id).nonzero().shape[0] > 0:
                 idx_tensor = (batch["tokens"].input_ids[i] == his_token_id).nonzero().view(-1)
@@ -709,18 +733,19 @@ class MInterface(pl.LightningModule):
             # 处理 [ItemEmb] 标记
             if (batch["tokens"].input_ids[i] == item_token_id).nonzero().shape[0] > 0:
                 idx = (batch["tokens"].input_ids[i] == item_token_id).nonzero().item()
-                input_embeds[i, idx] = item_embeds[i]
+                input_embeds[i, idx] = item_emb
             
             # 处理 [SimilarHistoryEmb] 标记
             if (batch["tokens"].input_ids[i] == similar_history_token_id).nonzero().shape[0] > 0:
                 idx_tensor = (batch["tokens"].input_ids[i] == similar_history_token_id).nonzero().view(5,-1) #只有5个similar history
                 # print(f"idx_tensor {idx_tensor} \n shape {idx_tensor.shape}")
-                tmp=batch["len_seq"][i].item()
+                # tmp=batch["len_seq"][i].item()
                 # print(f"len_seq {tmp}")
                 # print(f"similar_history_embeds {similar_history_embeds.shape}")
-                for idxs, item_embs in zip(idx_tensor, similar_history_embeds[i, :5]): #这里看是否进行打分排序，如果不打分就直接选择前5 个
+                for idxs, item_embs in zip(idx_tensor, similar_history_embeds[i, :5]): #这里看是否进行打分排序，如果不打分就直接选择前5 个 
+                # similar_history_embeds[i, :5] shape = [5,10,4096] 
                     for idx, item_emb in zip(idxs, item_embs):
-                        tmp=input_embeds[i, idx]
+                        # tmp=input_embeds[i, idx]
                         # print(f"input_embeds {tmp.shape}")
                         # print(f"item_emb {item_emb.shape}")
                         input_embeds[i, idx] = item_emb
@@ -730,7 +755,7 @@ class MInterface(pl.LightningModule):
             if (batch["tokens"].input_ids[i] == similar_choice_token_id).nonzero().shape[0] > 0:
                 idxs = (batch["tokens"].input_ids[i] == similar_choice_token_id).nonzero().view(-1)
                 for idx, similar_choice_embed in zip(idxs,similar_choice_embeds[i][:5]):
-                    input_embeds[i, idx] = similar_choice_embed
+                    input_embeds[i, idx] = item_emb
     
         return input_embeds
 

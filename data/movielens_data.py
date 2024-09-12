@@ -110,6 +110,7 @@ class MovielensData(data.Dataset):
         train_data['next'] = train_data['next'].apply(get_id_from_tumple)
         train_data['seq'] = train_data['seq'].apply(get_id_from_list)
         train_data['seq_unpad']=train_data['seq_unpad'].apply(get_id_from_list)
+        # 因为most_similar_seq现在变成[batch, 10, len_similar_seq]的 shape，所以对这里进行修改
         train_data['most_similar_seq_next'] = train_data['most_similar_seq_next'].apply(get_id_from_list)
         train_data['most_similar_seq'] = train_data['most_similar_seq'].apply(get_id_from_2dlist)
         # print(train_data['most_similar_seq'].tolist()[:2])

@@ -35,9 +35,9 @@ CUDA_VISIBLE_DEVICES=6 python3 main.py \
 --prompt_path /mnt/bn/data-tns-live-llm/leon/recom/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
 --rec_embed SASRec \
 --llm_tuning lora \
---llm_path /mnt/bn/data-tns-live-llm/leon/datasets/llama-2-7b-bnb-4bit  \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/rec/checkpoint-0/  \
 --rec_model_path ./rec_model/movielens.pt \
---output_dir /mnt/bn/data-tns-live-llm/leon/datasets/rec/movielens_unsloth \
+--output_dir /mnt/bn/data-tns-live-llm/leon/datasets/rec/movielens_unsloth_itemid \
 --log_dir movielens_logs \
 --lr_warmup_start_lr 2e-6 \
 --lr 2e-4 \
