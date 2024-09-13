@@ -47,7 +47,7 @@ Please output the recommendation in the format below:
 ['Recommendation': movie_name] \n
 """
 
-reco_prompt_history = """Similar user {i}: He/She has watched {SimilarHistory}. Based on this, He/She will likely choose {SimilarChoice} to watch next. \n"""
+reco_prompt_history = """Similar user {i}: He/She has watched {SimilarHistory}. Based on this, She/he chose {SimilarChoice} to watch next. \n"""
 
 reco_prompt_instruct = """The visit history of this user is: {HistoryHere}. Recommend one movie from the following set of titles: {CansHere}. Output:"""
 
