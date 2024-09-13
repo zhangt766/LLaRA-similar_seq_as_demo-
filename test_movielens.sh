@@ -23,6 +23,26 @@ CUDA_VISIBLE_DEVICES=2 python3 main.py \
 --batch_size 4 \
 --accumulate_grad_batches 32 \
 --dataset movielens_data \
+--data_dir /mnt/bn/data-tns-live-llm/leon/recom/LLaRA-similar_seq_as_demo-/data/LLaRA/movielens \
+--cans_num 20 \
+--prompt_path /mnt/bn/data-tns-live-llm/leon/recom/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
+--rec_embed SASRec \
+--llm_tuning lora \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/rec/movielens_unsloth_itemid \
+--rec_model_path ./rec_model/movielens.pt \
+--output_dir ./output/movielens/ \
+--log_dir movielens_logs \
+--lr_warmup_start_lr 2e-6 \
+--lr 2e-4 \
+--lr_decay_min_lr 2e-6 \
+--max_epochs 5 \
+--unsloth 1
+
+CUDA_VISIBLE_DEVICES=2 python3 main.py \
+--mode test \
+--batch_size 4 \
+--accumulate_grad_batches 32 \
+--dataset movielens_data \
 --data_dir /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/data/LLaRA/movielens \
 --cans_num 20 \
 --prompt_path /mnt/bn/data-tns-live-llm/leon/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
