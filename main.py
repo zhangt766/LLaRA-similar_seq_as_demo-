@@ -5,7 +5,7 @@ from pytorch_lightning import Trainer
 import pytorch_lightning.callbacks as plc
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
-from model.model_interface import MInterface
+from model.model_interface_1 import MInterface
 from data.data_interface import DInterface
 from recommender.A_SASRec_final_bce_llm import SASRec, Caser, GRU
 from SASRecModules_ori import *
@@ -135,6 +135,9 @@ if __name__ == '__main__':
     parser.add_argument('--lora_dropout', default=0.1, type=float)
     parser.add_argument('--model_max_length', default=2048, type=int)
     parser.add_argument('--unsloth', default=0, type=int)
+
+    parser.add_argument('--adapter_path', default="/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter", type=str)
+    parser.add_argument('--score_model_path', default="/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model", type=str)
 
     parser.add_argument('--num_sanity_val_steps', default=0, type=int)
 
