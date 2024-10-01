@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0 python3 main.py \
+CUDA_VISIBLE_DEVICES=1 python3 main.py \
 --mode test \
 --batch_size 4 \
 --accumulate_grad_batches 32 \
@@ -8,7 +8,7 @@ CUDA_VISIBLE_DEVICES=0 python3 main.py \
 --prompt_path /mnt/bn/data-tns-live-llm/leon/recom/LLaRA-similar_seq_as_demo-/prompt/movie.txt \
 --rec_embed SASRec \
 --llm_tuning lora \
---llm_path /mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter \
+--llm_path /mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter_5/0_999/ \
 --rec_model_path ./rec_model/movielens.pt \
 --output_dir ./output/movielens/ \
 --log_dir movielens_logs \
