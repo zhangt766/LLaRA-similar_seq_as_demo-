@@ -409,12 +409,14 @@ class MInterface(pl.LightningModule):
         df.to_csv(op.join(self.hparams.output_dir, 'test.csv'))
         # prediction_valid_ratio,hr=self.calculate_hr1(self.test_content)
         # metric=hr*prediction_valid_ratio
-        ndcg_score_3 = self.calculate_ndcg_at_n(self.test_content,3)
+        ndcg_score_1 = self.calculate_ndcg_at_n(self.test_content,1)
         ndcg_score_5 = self.calculate_ndcg_at_n(self.test_content,5)
         ndcg_score_10 = self.calculate_ndcg_at_n(self.test_content,10)
-        self.log("NDCG@3", ndcg_score_3, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
-        self.log("NDCG@5", ndcg_score_5, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
-        self.log("NDCG@10", ndcg_score_10, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        ndcg_score_20 = self.calculate_ndcg_at_n(self.test_content,20)
+        self.log("DCG@1", ndcg_score_1, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log("DCG@5", ndcg_score_5, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log("DCG@10", ndcg_score_10, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log("DCG@20", ndcg_score_20, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         # self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         # self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         # self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
@@ -636,7 +638,8 @@ class MInterface(pl.LightningModule):
         return embeds
 
     def wrap_emb(self, batch):
-        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
+        # input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
+        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids)
         return input_embeds
         # his_token_id=self.llama_tokenizer("[HistoryEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # cans_token_id=self.llama_tokenizer("[CansEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
@@ -760,22 +763,8 @@ class MInterface(pl.LightningModule):
             dcg += scores[i] / math.log2(i + 2)
         return dcg
 
-    def calculate_ndcg(self, scores, k):
-        """
-        计算NDCG@k。
-        :param scores: 相关性分数列表
-        :param k: 计算NDCG@k
-        :return: NDCG@k值
-        """
-        best_scores = sorted(scores, reverse=True)
-        dcg = self.calculate_dcg(scores, k)
-        idcg = self.calculate_dcg(best_scores, k)
-        if idcg == 0:
-            return 0
-        return dcg / idcg
-
-    def calculate_ndcg_at_n(self, eval_content, N=3):
-        print(f"NDCG N: {N}")
+    def calculate_dcg_at_n(self, eval_content, N=3):
+        print(f"DCG N: {N}")
         ndcg_num = 0
         total_num = 0
         for i, generate in enumerate(eval_content["generate"]):
@@ -790,7 +779,7 @@ class MInterface(pl.LightningModule):
             retrieved_cans, similarities = self.retrieve_candidates(generate, cans, N)
 
             # 计算NDCG@N
-            ndcg_at_n = self.calculate_ndcg(similarities.cpu().numpy(), N)
+            ndcg_at_n = self.calculate_dcg(similarities.cpu().numpy(), N)
             ndcg_num += ndcg_at_n
 
         ndcg_score = ndcg_num / total_num

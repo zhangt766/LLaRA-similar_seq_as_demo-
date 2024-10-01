@@ -5,11 +5,15 @@ from pytorch_lightning import Trainer
 import pytorch_lightning.callbacks as plc
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
-from model.model_interface_1 import MInterface
+from model.model_interface_5 import MInterface
 from data.data_interface import DInterface
 from recommender.A_SASRec_final_bce_llm import SASRec, Caser, GRU
 from SASRecModules_ori import *
 from transformers import LlamaForCausalLM, LlamaTokenizer
+import torch
+# from lightning.pytorch.cli import LightningCLI
+# torch.set_float32_matmul_precision('high')
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 def load_callbacks(args):
     callbacks = []
@@ -54,6 +58,12 @@ def main(args):
     if not os.path.exists(args.ckpt_dir):
         os.makedirs(args.ckpt_dir)
 
+    # cli = LightningCLI(model, data_module, args=args, run=False)
+    # if args.mode == 'train':
+    #     cli.trainer.fit(cli.model)
+    # else:
+    #     cli.trainer.test(cli.model)
+
     trainer = Trainer.from_argparse_args(args)
 
     if args.auto_lr_find:
@@ -82,7 +92,7 @@ if __name__ == '__main__':
     parser.add_argument('--accelerator', default='gpu', type=str)
     parser.add_argument('--devices', default=-1, type=int)
     parser.add_argument('--precision', default=16)
-    parser.add_argument('--amp_backend', default="native", type=str)
+    # parser.add_argument('--amp_backend', default="native", type=str)
 
     parser.add_argument('--batch_size', default=8, type=int)
     parser.add_argument('--num_workers', default=128, type=int)
