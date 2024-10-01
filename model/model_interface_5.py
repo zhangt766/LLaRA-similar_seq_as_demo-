@@ -88,11 +88,11 @@ class MInterface(pl.LightningModule):
     def get_score_model(self):
         self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
 
-    def copy_and_quantization(self, epoch):
-        self.llama_model.save_pretrained(f"{self.adapter_path}/{epoch}")
+    def copy_and_quantization(self, epoch, batch_idx):
+        self.llama_model.save_pretrained(f"{self.adapter_path}/{epoch}_{batch_idx}")
         self.score_model = LlamaForCausalLM.from_pretrained(self.hparams.llm_path)
         self.score_model.resize_token_embeddings(len(self.llama_tokenizer))
-        self.score_model = PeftModel.from_pretrained(self.score_model, f"{self.adapter_path}/{epoch}")
+        self.score_model = PeftModel.from_pretrained(self.score_model, f"{self.adapter_path}/{epoch}_{batch_idx}")
         self.score_model = self.score_model.merge_and_unload()
         self.score_model.save_pretrained(self.score_model_path)
         self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
@@ -318,10 +318,11 @@ class MInterface(pl.LightningModule):
         #每1000step 更新 score model
         # print(batch_idx)
         if (batch_idx+1)%1000==0: 
-            if not self.unsloth: self.copy_and_quantization(self.current_epoch)
-            else: 
-                self.llama_model.save_pretrained(self.output_dir)
-                self.llama_tokenizer.save_pretrained(self.output_dir)
+            self.copy_and_quantization(self.current_epoch, batch_idx)
+            # if not self.unsloth: self.copy_and_quantization(self.current_epoch)
+            # else: 
+            #     self.llama_model.save_pretrained(self.output_dir)
+            #     self.llama_tokenizer.save_pretrained(self.output_dir)
         return loss
     
     def on_validation_epoch_start(self):
@@ -377,10 +378,11 @@ class MInterface(pl.LightningModule):
         for i, generate in enumerate(generate_output):
             # if i == 0: print(generate)
             try: 
-                generate = generate.split("Recommendation: [")[1].split(":")
-                if len(generate)>2: generate = "".join(generate[1:])
-                else: generate = generate[1]
-                generate.split("]")[0].strip()
+                generate = generate.split("Output:")[1].split("['Recommendation': ")[1]
+                # if len(generate)>2: generate = "".join(generate[1:])
+                # else: generate = generate[1]
+                generate = generate.split("]")[0].strip()
+                print(generate)
             except: 
                 print("generation in bad format")
                 print(generate_output[i])
@@ -407,16 +409,24 @@ class MInterface(pl.LightningModule):
         if not os.path.exists(self.hparams.output_dir):
             os.makedirs(self.hparams.output_dir)
         df.to_csv(op.join(self.hparams.output_dir, 'test.csv'))
-        # prediction_valid_ratio,hr=self.calculate_hr1(self.test_content)
         # metric=hr*prediction_valid_ratio
-        ndcg_score_1 = self.calculate_ndcg_at_n(self.test_content,1)
-        ndcg_score_5 = self.calculate_ndcg_at_n(self.test_content,5)
-        ndcg_score_10 = self.calculate_ndcg_at_n(self.test_content,10)
+        ndcg_score_1, retrieved_cans_1 = self.calculate_dcg_at_n(self.test_content,1)
+        ndcg_score_5, retrieved_cans_5 = self.calculate_dcg_at_n(self.test_content,5)
+        ndcg_score_10, retrieved_cans_10 = self.calculate_dcg_at_n(self.test_content,10)
+        ndcg_score_20, retrieved_cans_20 = self.calculate_dcg_at_n(self.test_content,20)
+        hr_1=self.calculate_hr1(self.test_content, retrieved_cans_1)
+        hr_5=self.calculate_hr1(self.test_content, retrieved_cans_5)
+        hr_10=self.calculate_hr1(self.test_content, retrieved_cans_10)
+        hr_20=self.calculate_hr1(self.test_content, retrieved_cans_20)
         self.log("DCG@1", ndcg_score_1, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         self.log("DCG@5", ndcg_score_5, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         self.log("DCG@10", ndcg_score_10, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log("DCG@20", ndcg_score_20, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         # self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
-        # self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('hr@1', hr_1, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('hr@5', hr_5, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('hr@10', hr_10, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log('hr@20', hr_20, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         # self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
 
     def configure_optimizers(self):
@@ -479,7 +489,7 @@ class MInterface(pl.LightningModule):
         dtype=None
 
         self.llama_model, self.llama_tokenizer = FastLanguageModel.from_pretrained(
-            model_name = llm_path,
+            model_name = "/mnt/bn/data-tns-live-llm/leon/datasets/llama-3-8b-bnb-4bit/",
             max_seq_length = max_seq_length,
             dtype = dtype,
             load_in_4bit = True,
@@ -496,6 +506,7 @@ class MInterface(pl.LightningModule):
             ]
         })
         self.llama_model.resize_token_embeddings(len(self.llama_tokenizer))
+        if self.is_test: self.llama_model = PeftModel.from_pretrained(self.llama_model, llm_path)
 
         if not self.is_test:
             print("loading lora parameters")
@@ -766,6 +777,7 @@ class MInterface(pl.LightningModule):
         print(f"DCG N: {N}")
         ndcg_num = 0
         total_num = 0
+        retrieved_candidates = []
         for i, generate in enumerate(eval_content["generate"]):
             real = eval_content["real"][i]
             cans = eval_content["cans"][i]
@@ -780,9 +792,11 @@ class MInterface(pl.LightningModule):
             # 计算NDCG@N
             ndcg_at_n = self.calculate_dcg(similarities.cpu().numpy(), N)
             ndcg_num += ndcg_at_n
+            # print(retrieved_cans[:N])
+            retrieved_candidates.append(retrieved_cans[:N])
 
         ndcg_score = ndcg_num / total_num
-        return ndcg_score
+        return ndcg_score, retrieved_candidates
 
 
 
@@ -825,30 +839,35 @@ class MInterface(pl.LightningModule):
     #     item_txt_embs=self.projector(item_rec_embs)
     #     return item_txt_embs
 
-    # def calculate_hr1(self, eval_content):
-    #     correct_num = 0
-    #     ndcg_num = 0
-    #     total_num = 0
-    #     for i, generate in enumerate(eval_content["generate"]):
-    #         # print(f"Debug: generate type: {type(generate)}")
-    #         # print("generate:",generate)
-    #         real = eval_content["real"][i]
-    #         cans = eval_content["cans"][i]
-    #         total_num += 1
-    #         generate = generate.strip().lower().strip()
-    #         real = real.strip().lower().strip()
-    #         cans = [item.strip().lower().strip() for item in cans]
-    #         gen_cans_list = []
-    #         for cans_item in cans:
-    #             if cans_item in generate:
-    #                 gen_cans_list.append(cans_item)
-    #         if len(gen_cans_list) == 1:
-    #             valid_num += 1
-    #             if real == gen_cans_list[0]:
-    #                 correct_num += 1
-    #     valid_ratio = valid_num / total_num
-    #     if valid_num > 0:
-    #         hr1 = correct_num / valid_num
-    #     else:
-    #         hr1 = 0
-    #     return valid_ratio, hr1
+    def calculate_hr1(self, eval_content, retrieved_content):
+        correct_num = 0
+        total_num = len(eval_content["real"])
+        for i, generate in enumerate(eval_content["generate"]):
+            real = eval_content["real"][i]
+            real = real.strip().lower().strip()
+            if real in retrieved_content[i]: correct_num+=1
+            
+        hr1 = correct_num / total_num
+        # for i, generate in enumerate(eval_content["generate"]):
+        #     # print(f"Debug: generate type: {type(generate)}")
+        #     # print("generate:",generate)
+        #     real = eval_content["real"][i]
+        #     cans = eval_content["cans"][i]
+        #     total_num += 1
+        #     generate = generate.strip().lower().strip()
+        #     real = real.strip().lower().strip()
+        #     cans = [item.strip().lower().strip() for item in cans]
+        #     gen_cans_list = []
+        #     for cans_item in cans:
+        #         if cans_item in generate:
+        #             gen_cans_list.append(cans_item)
+        #     if len(gen_cans_list) == 1:
+        #         valid_num += 1
+        #         if real == gen_cans_list[0]:
+        #             correct_num += 1
+        # valid_ratio = valid_num / total_num
+        # if valid_num > 0:
+        #     hr1 = correct_num / valid_num
+        # else:
+        #     hr1 = 0
+        return hr1
