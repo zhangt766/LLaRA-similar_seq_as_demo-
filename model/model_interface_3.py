@@ -57,29 +57,39 @@ class MInterface(pl.LightningModule):
     def __init__(self, 
                  **kargs):
         super().__init__()
-        self.adapter_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter"
-        self.score_model_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model"
+        # self.adapter_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model_adapter"
+        self.adapter_path = kargs["adapter_path"]
+        # self.score_model_path = "/mnt/bn/data-tns-live-llm/leon/datasets/rec/score_model"
+        self.score_model_path = kargs["score_model_path"]
         self.output_dir = kargs["output_dir"]
         self.save_hyperparameters()
         self.model_max_length = kargs["model_max_length"]
         self.is_test = (kargs["mode"]=="test")
+        print(f"is test {self.is_test}")
         self.unsloth = kargs["unsloth"]
         if not self.unsloth: 
             self.get_quant_model(self.hparams.llm_path)
             if not self.is_test: self.get_score_model()
-        else: self.load_unsloth_llm(self.hparams.llm_path)
+            else:
+                print("Loading encoder")
+                self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+        else: 
+            self.load_unsloth_llm(self.hparams.llm_path)
+            if self.is_test: 
+                print("Loading encoder")
+                self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         self.batch_size = kargs["batch_size"]
-        self.load_rec_model(self.hparams.rec_model_path)
-        self.load_projector()
+        # self.load_rec_model(self.hparams.rec_model_path)
+        # self.load_projector()
     
     def get_score_model(self):
         self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
 
-    def copy_and_quantization(self):
-        self.llama_model.save_pretrained(self.adapter_path)
+    def copy_and_quantization(self, epoch):
+        self.llama_model.save_pretrained(f"{self.adapter_path}/{epoch}")
         self.score_model = LlamaForCausalLM.from_pretrained(self.hparams.llm_path)
         self.score_model.resize_token_embeddings(len(self.llama_tokenizer))
-        self.score_model = PeftModel.from_pretrained(self.score_model, self.adapter_path)
+        self.score_model = PeftModel.from_pretrained(self.score_model, f"{self.adapter_path}/{epoch}")
         self.score_model = self.score_model.merge_and_unload()
         self.score_model.save_pretrained(self.score_model_path)
         self.score_model = LlamaForCausalLM.from_pretrained(self.score_model_path, load_in_4bit=True)
@@ -142,21 +152,22 @@ class MInterface(pl.LightningModule):
             similar_historys = input["most_similar_seq_name"][:3]
             similar_choices = input["most_similar_seq_next_name"][:3]
         
-        def format_similar_history(input):
-            return ", ".join([seq_title + ' [SimilarHistoryEmb]' for seq_title in input])
+        # def format_similar_history(input):
+        #     return ", ".join([seq_title + ' [SimilarHistoryEmb]' for seq_title in input])
             
-        def format_similar_choice(input):
-            return input + ' [SimilarChoiceEmb]'
+        # def format_similar_choice(input):
+        #     return input + ' [SimilarChoiceEmb]'
         
-        # 添加 Emb token
-        similar_historys = [format_similar_history(similar_history) for similar_history in similar_historys]
-        similar_choices = [format_similar_choice(similar_choice) for similar_choice in similar_choices]
-        history_here = ", ".join([seq_title+' [HistoryEmb]' for seq_title in input['seq_name']])
-        cans_here = ", ".join([can_title+' [CansEmb]' for can_title in input['cans_name']])
+        # # 添加 Emb token
+        # similar_historys = [format_similar_history(similar_history) for similar_history in similar_historys]
+        # similar_choices = [format_similar_choice(similar_choice) for similar_choice in similar_choices]
+        # history_here = ", ".join([seq_title+' [HistoryEmb]' for seq_title in input['seq_name']])
+        # cans_here = ", ".join([can_title+' [CansEmb]' for can_title in input['cans_name']])
 
         demos = [reco_prompt_history.format_map({"i":i,"SimilarHistory":similar_history, "SimilarChoice":similar_choice}) for i, (similar_history,similar_choice) in enumerate(zip(similar_historys, similar_choices))]
         demos = "".join(demos)
-        instruction = reco_prompt_instruct.format_map({"HistoryHere":history_here, "CansHere":cans_here})
+        instruction = reco_prompt_instruct.format_map({"HistoryHere":input["seq_name"], "CansHere":input["cans_name"]})
+        # instruction = reco_prompt_instruct.format_map({"HistoryHere":history_here, "CansHere":cans_here})
         instruction = reco_instruct + demos+" "+instruction
         # print("instruction", instruction)
         return instruction
@@ -304,7 +315,7 @@ class MInterface(pl.LightningModule):
         #每1000step 更新 score model
         # print(batch_idx)
         if (batch_idx+1)%1000==0: 
-            if not self.unsloth: self.copy_and_quantization()
+            if not self.unsloth: self.copy_and_quantization(self.current_epoch)
             else: 
                 self.llama_model.save_pretrained(self.output_dir)
                 self.llama_tokenizer.save_pretrained(self.output_dir)
@@ -363,7 +374,7 @@ class MInterface(pl.LightningModule):
         for i, generate in enumerate(generate_output):
             # if i == 0: print(generate)
             try: 
-                generate = generate.split("Output: [")[1].split(":")
+                generate = generate.split("Recommendation: [")[1].split(":")
                 if len(generate)>2: generate = "".join(generate[1:])
                 else: generate = generate[1]
                 generate.split("]")[0].strip()
@@ -393,11 +404,17 @@ class MInterface(pl.LightningModule):
         if not os.path.exists(self.hparams.output_dir):
             os.makedirs(self.hparams.output_dir)
         df.to_csv(op.join(self.hparams.output_dir, 'test.csv'))
-        prediction_valid_ratio,hr=self.calculate_hr1(self.test_content)
-        metric=hr*prediction_valid_ratio
-        self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
-        self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
-        self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        # prediction_valid_ratio,hr=self.calculate_hr1(self.test_content)
+        # metric=hr*prediction_valid_ratio
+        ndcg_score_1 = self.calculate_ndcg_at_n(self.test_content,1)
+        ndcg_score_5 = self.calculate_ndcg_at_n(self.test_content,5)
+        ndcg_score_10 = self.calculate_ndcg_at_n(self.test_content,10)
+        self.log("DCG@1", ndcg_score_1, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log("DCG@5", ndcg_score_5, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        self.log("DCG@10", ndcg_score_10, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        # self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        # self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
+        # self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
 
     def configure_optimizers(self):
         if hasattr(self.hparams, 'weight_decay'):
@@ -481,8 +498,7 @@ class MInterface(pl.LightningModule):
             self.llama_model = FastLanguageModel.get_peft_model(
                 self.llama_model,
                 r = 16,
-                target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                                "gate_proj", "up_proj", "down_proj",],
+                target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",],
                 lora_alpha = 32,
                 lora_dropout = 0, # Supports any, but = 0 is optimized
                 bias = "none",    # Supports any, but = "none" is optimized
@@ -611,52 +627,15 @@ class MInterface(pl.LightningModule):
             raise NotImplementedError()
  
         print('Loading LLAMA Done')
-
-    def load_projector(self):
-        name = self.hparams.model_name
-        camel_name = ''.join([i.capitalize() for i in name.split('_')])
-        try:
-            Model = getattr(importlib.import_module(
-                '.'+name, package=__package__), camel_name)
-        except:
-            raise ValueError(
-                f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
-        self.projector = self.instancialize(Model, rec_size=self.hparams.rec_size, llm_size=self.llama_model.config.hidden_size)
-
-    def instancialize(self, Model, **other_args):
-        class_args = inspect.getargspec(Model.__init__).args[1:]
-        inkeys = self.hparams.keys()
-        args1 = {}
-        for arg in class_args:
-            if arg in inkeys:
-                args1[arg] = getattr(self.hparams, arg)
-        args1.update(other_args)
-        return Model(**args1)
-
-    def load_rec_model(self, rec_model_path):
-        print('Loading Rec Model')
-        self.rec_model = torch.load(rec_model_path, map_location="cpu")
-        self.rec_model.eval()
-        for name, param in self.rec_model.named_parameters():
-            param.requires_grad = False
-        print('Loding Rec model Done')
-
-    def encode_items(self, seq):
-        seq = seq.cuda()
-        if self.hparams.rec_embed=="SASRec":
-            item_rec_embs=self.rec_model.cacu_x(seq)
-        elif self.hparams.rec_embed in ['Caser','GRU']:
-            item_rec_embs=self.rec_model.item_embeddings(seq)
-        item_txt_embs=self.projector(item_rec_embs)
-        return item_txt_embs
     
     def embed_tokens(self, token_ids):
         embeds = self.llama_model.base_model.embed_tokens(token_ids)
         return embeds
 
     def wrap_emb(self, batch):
-        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
-        # return input_embeds
+        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids)
+        # input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
+        return input_embeds
         # his_token_id=self.llama_tokenizer("[HistoryEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # cans_token_id=self.llama_tokenizer("[CansEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # item_token_id=self.llama_tokenizer("[ItemEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
@@ -734,63 +713,138 @@ class MInterface(pl.LightningModule):
     
         return input_embeds
 
-    def calculate_hr1(self, eval_content):
+    def calculate_ndcg1(self, eval_content):
         correct_num = 0
-        valid_num = 0
         total_num = 0
         for i, generate in enumerate(eval_content["generate"]):
-            # print(f"Debug: generate type: {type(generate)}")
-            # print("generate:",generate)
             real = eval_content["real"][i]
             cans = eval_content["cans"][i]
             total_num += 1
             generate = generate.strip().lower().strip()
             real = real.strip().lower().strip()
             cans = [item.strip().lower().strip() for item in cans]
-            gen_cans_list = []
-            for cans_item in cans:
-                if cans_item in generate:
-                    gen_cans_list.append(cans_item)
-            if len(gen_cans_list) == 1:
-                valid_num += 1
-                if real == gen_cans_list[0]:
-                    correct_num += 1
-        valid_ratio = valid_num / total_num
-        if valid_num > 0:
-            hr1 = correct_num / valid_num
-        else:
-            hr1 = 0
-        return valid_ratio, hr1
+            
+            # 假设只有一个候选生成（cans），那么 NDCG@1 就是正确答案是否是这个候选
+            if generate == real:
+                correct_num += 1
+        
+        ndcg1 = correct_num / total_num if total_num > 0 else 0
+        return ndcg1
+    
+    def retrieve_candidates(self, query, corpus, top_k):
+        """
+        使用encoder检索最相似的N个候选句子。
+        :param query: 查询句子
+        :param corpus: 候选句子集合
+        :param top_k: 检索的候选数量
+        :return: 检索到的候选句子及其相似度分数
+        """
+        query_embedding = self.encoder.encode(query, convert_to_tensor=True)
+        corpus_embeddings = self.encoder.encode(corpus, convert_to_tensor=True)
+        similarities = util.pytorch_cos_sim(query_embedding, corpus_embeddings)
+        top_indices = similarities[0].topk(top_k, largest=True)[1].tolist()
+        top_similarities = similarities[0][top_indices]
+        return [corpus[i] for i in top_indices], top_similarities
+
+    def calculate_dcg(self, scores, k):
+        """
+        计算DCG@k。
+        :param scores: 相关性分数列表
+        :param k: 计算DCG@k
+        :return: DCG@k值
+        """
+        dcg = 0
+        for i in range(min(k, len(scores))):
+            dcg += scores[i] / math.log2(i + 2)
+        return dcg
+
+    def calculate_dcg_at_n(self, eval_content, N=3):
+        print(f"DCG N: {N}")
+        ndcg_num = 0
+        total_num = 0
+        for i, generate in enumerate(eval_content["generate"]):
+            real = eval_content["real"][i]
+            cans = eval_content["cans"][i]
+            total_num += 1
+            generate = generate.strip().lower().strip()
+            real = real.strip().lower().strip()
+            cans = [item.strip().lower().strip() for item in cans]
+
+            # 检索逻辑
+            retrieved_cans, similarities = self.retrieve_candidates(generate, cans, N)
+
+            # 计算NDCG@N
+            ndcg_at_n = self.calculate_dcg(similarities.cpu().numpy(), N)
+            ndcg_num += ndcg_at_n
+
+        ndcg_score = ndcg_num / total_num
+        return ndcg_score
 
 
 
 
+    # def load_projector(self):
+    #     name = self.hparams.model_name
+    #     camel_name = ''.join([i.capitalize() for i in name.split('_')])
+    #     try:
+    #         Model = getattr(importlib.import_module(
+    #             '.'+name, package=__package__), camel_name)
+    #     except:
+    #         raise ValueError(
+    #             f'Invalid Module File Name or Invalid Class Name {name}.{camel_name}!')
+    #     self.projector = self.instancialize(Model, rec_size=self.hparams.rec_size, llm_size=self.llama_model.config.hidden_size)
 
+    # def instancialize(self, Model, **other_args):
+    #     class_args = inspect.getargspec(Model.__init__).args[1:]
+    #     inkeys = self.hparams.keys()
+    #     args1 = {}
+    #     for arg in class_args:
+    #         if arg in inkeys:
+    #             args1[arg] = getattr(self.hparams, arg)
+    #     args1.update(other_args)
+    #     return Model(**args1)
 
+    # def load_rec_model(self, rec_model_path):
+    #     print('Loading Rec Model')
+    #     self.rec_model = torch.load(rec_model_path, map_location="cpu")
+    #     self.rec_model.eval()
+    #     for name, param in self.rec_model.named_parameters():
+    #         param.requires_grad = False
+    #     print('Loding Rec model Done')
 
-     
-    # def calculate_hr1(self,eval_content):
-    #     correct_num=0
-    #     valid_num=0
-    #     total_num=0
-    #     for i,generate in enumerate(eval_content["generate"]):
-    #         real=eval_content["real"][i]
-    #         cans=eval_content["cans"][i]
-    #         total_num+=1
-    #         generate=generate.strip().lower().strip()
-    #         real=real.strip().lower().strip()
-    #         cans=[item.strip().lower().strip() for item in cans]
-    #         gen_cans_list=[]
+    # def encode_items(self, seq):
+    #     seq = seq.cuda()
+    #     if self.hparams.rec_embed=="SASRec":
+    #         item_rec_embs=self.rec_model.cacu_x(seq)
+    #     elif self.hparams.rec_embed in ['Caser','GRU']:
+    #         item_rec_embs=self.rec_model.item_embeddings(seq)
+    #     item_txt_embs=self.projector(item_rec_embs)
+    #     return item_txt_embs
+
+    # def calculate_hr1(self, eval_content):
+    #     correct_num = 0
+    #     ndcg_num = 0
+    #     total_num = 0
+    #     for i, generate in enumerate(eval_content["generate"]):
+    #         # print(f"Debug: generate type: {type(generate)}")
+    #         # print("generate:",generate)
+    #         real = eval_content["real"][i]
+    #         cans = eval_content["cans"][i]
+    #         total_num += 1
+    #         generate = generate.strip().lower().strip()
+    #         real = real.strip().lower().strip()
+    #         cans = [item.strip().lower().strip() for item in cans]
+    #         gen_cans_list = []
     #         for cans_item in cans:
     #             if cans_item in generate:
     #                 gen_cans_list.append(cans_item)
-    #         if len(gen_cans_list)==1:
-    #             valid_num+=1
+    #         if len(gen_cans_list) == 1:
+    #             valid_num += 1
     #             if real == gen_cans_list[0]:
-    #                 correct_num+=1
-    #     valid_ratio=valid_num/total_num
-    #     if valid_num>0:
-    #         hr1=correct_num/valid_num
+    #                 correct_num += 1
+    #     valid_ratio = valid_num / total_num
+    #     if valid_num > 0:
+    #         hr1 = correct_num / valid_num
     #     else:
-    #         hr1=0
-    #     return valid_ratio,hr1
+    #         hr1 = 0
+    #     return valid_ratio, hr1

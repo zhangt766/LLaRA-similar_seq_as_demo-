@@ -655,7 +655,8 @@ class MInterface(pl.LightningModule):
         return embeds
 
     def wrap_emb(self, batch):
-        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
+        input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids)
+        # input_embeds = self.llama_model.get_input_embeddings()(batch["tokens"].input_ids).detach()
         # return input_embeds
         # his_token_id=self.llama_tokenizer("[HistoryEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
         # cans_token_id=self.llama_tokenizer("[CansEmb]", return_tensors="pt",add_special_tokens=False).input_ids.item()
